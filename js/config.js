@@ -10,6 +10,6 @@
    → API). Ne mettez JAMAIS ici la clé « service_role » / « secret ».
    ========================================================================== */
 window.TAPIGO_CONFIG = {
-  supabaseUrl: '',      // ex : 'https://abcdefghijkl.supabase.co'
-  supabaseAnonKey: ''   // clé « anon » ou « publishable » (sb_publishable_…)
+  supabaseUrl: 'https://frylasycjociuxpcsmvc.supabase.co',
+  supabaseAnonKey: 'sb_publishable_TcUSbdrjRjF7QICc2jBlrQ_FluA2_Te'
 };
