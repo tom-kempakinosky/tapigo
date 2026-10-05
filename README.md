@@ -17,26 +17,36 @@ Ouvrez un **menu de table** et le **dashboard cuisine** dans deux onglets du mê
 | `index.html` | Accueil de démo : simulateur des tags NFC (tables 1 à N) et accès au dashboard |
 | `menu.html?table=12` | Interface client ouverte par le tag NFC |
 | `kitchen.html` | Dashboard restaurateur (cuisine / bar et édition du menu) |
+| `admin.html` | Administration Tapigo : restaurants et accès (mode en ligne) |
 
-## Passer en mode en ligne (vrais clients)
+## Mode en ligne : plusieurs restaurants
 
 Sans configuration, le site tourne en **mode démo** (données dans le navigateur uniquement).
-Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) (offre gratuite) :
+Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plusieurs restaurants :
 
-- Les clients commandent depuis leur téléphone via la plaque NFC (`menu.html?table=N`), et le paiement se fait à table.
-- Le **dashboard** (`kitchen.html`) est **protégé par e-mail et mot de passe** et reçoit les commandes en temps réel.
-- Les **prix sont recalculés par la base de données**, donc un client ne peut pas modifier le montant de sa commande.
-- Les clients ne peuvent lire ni les commandes des autres, ni modifier la carte.
+| Qui | Page | Accès |
+| --- | --- | --- |
+| Clients | `menu.html?r=<restaurant>&table=N` (plaque NFC) | Libre : voient la carte et commandent, paiement à table |
+| Restaurateurs | `kitchen.html` | E-mail et mot de passe. Chacun ne voit **que son restaurant** |
+| Équipe Tapigo | `admin.html` | Crée les restaurants et donne les accès |
 
-Mise en place :
+- **Rôles** : *Gérant* gère les commandes et la carte. *Équipe* gère les commandes uniquement. *Admin Tapigo* a accès à tous les restaurants.
+- **Sécurité** : les prix sont recalculés par la base de données. Un client ne peut ni lire les commandes, ni modifier une carte. Un restaurateur ne voit jamais les données d'un autre restaurant.
+- **Numéros de commande** : chaque restaurant a sa propre numérotation.
+
+### Installation
 1. Créez un projet Supabase.
-2. Dans **SQL Editor**, collez et exécutez `supabase/schema.sql`.
-3. Dans **Authentication → Users → Add user**, créez votre compte (e-mail et mot de passe, avec « Auto Confirm User »).
-4. Dans **SQL Editor**, exécutez `insert into public.staff (user_id) select id from auth.users where email = 'vous@exemple.fr';`
-5. Dans **Authentication → Sign In / Providers**, désactivez « Allow new users to sign up ».
-6. Dans `js/config.js`, renseignez l'URL du projet et la clé `anon` / `publishable` (**jamais** la clé `service_role`).
+2. Dans **SQL Editor**, collez et exécutez `supabase/schema.sql`. Le script peut être relancé sans risque, et il convertit automatiquement l'ancienne version « un seul restaurant ».
+3. Dans **Authentication → Users → Add user**, créez votre compte (cochez « Auto Confirm User »), puis devenez administrateur :
+   `insert into public.admins (user_id) select id from auth.users where email = 'vous@exemple.fr';`
+4. Dans **Authentication → Sign In / Providers**, désactivez « Allow new users to sign up ».
+5. Dans `js/config.js`, renseignez l'URL du projet et la clé `anon` / `publishable` (**jamais** la clé `service_role`).
 
-À la première connexion au dashboard, la carte de démonstration est copiée dans la base. Modifiez-la ensuite depuis l'onglet **Menu**. Les liens à programmer sur chaque plaque NFC se trouvent dans **Menu → Établissement**.
+### Ajouter un restaurant
+1. Ouvrez `admin.html` et cliquez sur **Créer un restaurant** (nom, identifiant, nombre de tables, carte de départ).
+2. Créez le compte du restaurateur dans Supabase (**Authentication → Users → Add user**, « Auto Confirm User »).
+3. Dans `admin.html`, saisissez son e-mail, cliquez sur **Donner l'accès**, puis **Copier les liens NFC** pour programmer les plaques.
+4. Envoyez-lui le lien `kitchen.html`, son e-mail et son mot de passe provisoire. Il le change ensuite dans **Mon compte**.
 
 ## Fonctionnalités
 
@@ -63,6 +73,7 @@ Mise en place :
 ├── index.html          Accueil démo / simulateur NFC
 ├── menu.html           Interface client
 ├── kitchen.html        Dashboard cuisine & bar
+├── admin.html          Administration Tapigo (restaurants, accès)
 ├── supabase/schema.sql  Base de données, droits et fonctions (mode en ligne)
 ├── css/tapigo.css      Charte « Chic & Élégant » (tokens, composants, responsive)
 └── js/
@@ -72,7 +83,8 @@ Mise en place :
     ├── store-remote.js Connecteur Supabase (mode en ligne)
     ├── ui.js           Bottom sheets, toasts, icônes, son, repli d’image
     ├── menu.js         Logique client
-    └── kitchen.js      Logique restaurateur
+    ├── kitchen.js      Logique restaurateur
+    └── admin.js        Logique administration
 ```
 
 `store.js` est le **seul** module qui touche aux données. En démo, il s’appuie sur `localStorage` et `BroadcastChannel`. Pour passer en production, il suffit de réimplémenter son API (`getMenu`, `saveItem`, `createOrder`, `updateOrderStatus`, `subscribe`…) au-dessus de Supabase, de Firebase ou d’une API REST + WebSocket. Les correspondances sont détaillées en tête du fichier.

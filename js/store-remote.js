@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Tapigo — Store en ligne (Supabase)
+   Tapigo — Store en ligne (Supabase, multi-restaurants)
 
    Actif uniquement si js/config.js contient l'URL et la clé du projet.
    Remplace les fonctions du store de démo par des appels à Supabase, en
@@ -8,6 +8,10 @@
      - écritures : appliquées au cache immédiatement, puis envoyées au serveur ;
      - temps réel : la cuisine reçoit les commandes via Supabase Realtime,
        le client suit sa commande via get_order() (toutes les 4 s).
+
+   Chaque page ouvre un restaurant :
+     - client     : T.openRestaurant(slug)          (slug lu dans ?r=…)
+     - dashboard  : T.startStaff({ id, slug, role }) (après connexion)
    Le schéma de la base est dans supabase/schema.sql.
    ========================================================================== */
 (function () {
@@ -24,6 +28,7 @@
   var T = window.Tapigo;
   var emit = T._emit;
   var sb = null;
+  var current = null; // { id, slug, role }
   var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [] };
   var pendingMenuWrites = 0;
 
@@ -43,6 +48,12 @@
       s.onerror = function () { reject(new Error('Connexion impossible. Vérifiez votre accès à Internet.')); };
       document.head.appendChild(s);
     });
+  }
+
+  function notFound() {
+    var e = new Error('Restaurant introuvable. Scannez à nouveau la plaque NFC de votre table.');
+    e.code = 'NOT_FOUND';
+    return e;
   }
 
   /* ---------------- Conversions base <-> app ---------------- */
@@ -79,16 +90,27 @@
     if (!skipMenu) cache.menu = row.menu || null;
   }
 
+  function subscribeRestaurant() {
+    // La carte se met à jour en direct quand le restaurateur la modifie.
+    sb.channel('tapigo-restaurant-' + current.id)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'restaurants', filter: 'id=eq.' + current.id }, function (p) {
+        applyRestaurant(p.new, pendingMenuWrites > 0);
+        emit('menu:updated', null);
+        emit('restaurant:updated', clone(cache.info));
+      })
+      .subscribe();
+  }
+
   /* ---------------- Écritures carte / établissement ---------------- */
   function persist(fields) {
     fields.updated_at = new Date().toISOString();
     var isMenu = 'menu' in fields;
     if (isMenu) pendingMenuWrites++;
     var done = function () { if (isMenu) pendingMenuWrites = Math.max(0, pendingMenuWrites - 1); };
-    return sb.from('restaurant').update(fields).eq('id', 1).select('id').then(function (r) {
+    return sb.from('restaurants').update(fields).eq('id', current.id).select('id').then(function (r) {
       done();
       if (r.error) throw r.error;
-      if (!r.data || !r.data.length) throw new Error('Modification refusée : reconnectez-vous.');
+      if (!r.data || !r.data.length) throw new Error('Modification refusée : seul le gérant peut modifier la carte.');
     }, function (e) { done(); throw e; }).catch(function (e) {
       fail(e);
       return refreshRestaurant().catch(function () {});
@@ -96,7 +118,7 @@
   }
 
   function refreshRestaurant() {
-    return sb.from('restaurant').select('info, menu').eq('id', 1).maybeSingle().then(function (r) {
+    return sb.from('restaurants').select('info, menu').eq('id', current.id).maybeSingle().then(function (r) {
       if (r.error) throw r.error;
       if (r.data) applyRestaurant(r.data);
       emit('menu:updated', null);
@@ -104,9 +126,17 @@
     });
   }
 
-  function menuForWrite() { return cache.menu || clone(EMPTY_MENU); }
+  // Une carte neuve reçoit les catégories et étiquettes standard.
+  function menuForWrite() {
+    var m = cache.menu || clone(EMPTY_MENU);
+    var d = window.TAPIGO_DEMO;
+    if (d && (!m.categories || !m.categories.length)) m.categories = clone(d.categories);
+    if (d && (!m.tags || !Object.keys(m.tags).length)) m.tags = clone(d.tags);
+    return m;
+  }
 
   T.mode = 'live';
+  T.currentRestaurant = function () { return clone(current); };
   T.hasMenu = function () { return !!(cache.menu && cache.menu.items && cache.menu.items.length); };
   T.getRestaurant = function () { return clone(cache.info); };
   T.getMenu = function () { return clone(cache.menu || EMPTY_MENU); };
@@ -115,6 +145,12 @@
     cache.info = Object.assign(clone(DEFAULT_INFO), info);
     emit('restaurant:updated', clone(cache.info));
     persist({ info: cache.info });
+  };
+
+  T.replaceMenu = function (menu) {
+    cache.menu = clone(menu);
+    emit('menu:updated', null);
+    return persist({ menu: cache.menu });
   };
 
   T.saveItem = function (item) {
@@ -159,14 +195,18 @@
     var items = (payload.lines || []).filter(Boolean).map(function (l) {
       return { itemId: l.itemId, qty: l.qty, selections: l.selections || {}, note: l.note || '' };
     });
-    return sb.rpc('place_order', { p_table: String(payload.table || ''), p_items: items, p_note: payload.note || '' })
-      .then(function (r) {
-        if (r.error) throw new Error(r.error.message);
-        var o = upsert(fromRow(r.data));
-        tracked[o.id] = o.status;
-        ensurePolling();
-        return clone(o);
-      });
+    return sb.rpc('place_order', {
+      p_restaurant: current.slug,
+      p_table: String(payload.table || ''),
+      p_items: items,
+      p_note: payload.note || ''
+    }).then(function (r) {
+      if (r.error) throw new Error(r.error.message);
+      var o = upsert(fromRow(r.data));
+      tracked[o.id] = o.status;
+      ensurePolling();
+      return clone(o);
+    });
   };
 
   // Équipe : changement de statut (optimiste, puis confirmé par le serveur).
@@ -193,7 +233,22 @@
     sb.from('orders').update({ seen: true }).eq('id', id).then(function (r) { if (r.error) fail(r.error); });
   };
 
-  /* ---------------- Suivi côté client ---------------- */
+  /* ---------------- Côté client ---------------- */
+  // slug absent (ancienne plaque sans ?r=) : accepté s'il n'existe qu'un restaurant.
+  T.openRestaurant = function (slug) {
+    var q = sb.from('restaurants').select('id, slug, info, menu').eq('active', true);
+    q = slug ? q.eq('slug', slug).limit(1) : q.limit(2);
+    return q.then(function (r) {
+      if (r.error) throw new Error('Base de données inaccessible : ' + r.error.message);
+      var rows = r.data || [];
+      if (!rows.length || (!slug && rows.length > 1)) throw notFound();
+      current = { id: rows[0].id, slug: rows[0].slug, role: null };
+      applyRestaurant(rows[0]);
+      subscribeRestaurant();
+      return clone(current);
+    });
+  };
+
   var tracked = {};
   var pollTimer = null;
 
@@ -225,22 +280,7 @@
     return pollOnce(true);
   };
 
-  /* ---------------- Espace équipe ---------------- */
-  var staffStarted = false;
-
-  function loadOrders() {
-    var since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
-    return sb.from('orders').select('*')
-      .or('status.neq.terminee,created_at.gte."' + since + '"')
-      .order('created_at', { ascending: true })
-      .limit(500)
-      .then(function (r) {
-        if (r.error) throw r.error;
-        cache.orders = r.data.map(fromRow);
-        emit('orders:sync', null);
-      });
-  }
-
+  /* ---------------- Comptes ---------------- */
   T.auth = {
     session: function () {
       return sb.auth.getSession().then(function (r) { return r.data.session; });
@@ -254,17 +294,58 @@
       });
     },
     signOut: function () { return sb.auth.signOut(); },
-    isStaff: function () {
-      return sb.rpc('is_staff').then(function (r) { return !r.error && r.data === true; });
+    changePassword: function (password) {
+      return sb.auth.updateUser({ password: password }).then(function (r) {
+        if (r.error) {
+          throw new Error(/different from the old/i.test(r.error.message)
+            ? 'Le nouveau mot de passe doit être différent de l’ancien.'
+            : /at least/i.test(r.error.message) ? 'Mot de passe trop court (6 caractères minimum).' : r.error.message);
+        }
+      });
+    },
+    // [{ id, slug, name, active, role: 'admin' | 'owner' | 'equipe' }]
+    myRestaurants: function () {
+      return sb.rpc('my_restaurants').then(function (r) {
+        if (r.error) throw r.error;
+        return r.data || [];
+      });
+    },
+    isAdmin: function () {
+      return sb.rpc('is_admin').then(function (r) { return !r.error && r.data === true; });
     }
   };
 
-  T.startStaff = function () {
+  /* ---------------- Espace équipe ---------------- */
+  var staffStarted = false;
+
+  function loadOrders() {
+    var since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+    return sb.from('orders').select('*')
+      .eq('restaurant_id', current.id)
+      .or('status.neq.terminee,created_at.gte."' + since + '"')
+      .order('created_at', { ascending: true })
+      .limit(500)
+      .then(function (r) {
+        if (r.error) throw r.error;
+        cache.orders = r.data.map(fromRow);
+        emit('orders:sync', null);
+      });
+  }
+
+  T.startStaff = function (restaurant) {
     if (staffStarted) return Promise.resolve();
     staffStarted = true;
-    return loadOrders().then(function () {
-      sb.channel('tapigo-orders')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, function (p) {
+    current = { id: restaurant.id, slug: restaurant.slug, role: restaurant.role };
+
+    return sb.from('restaurants').select('info, menu').eq('id', current.id).maybeSingle().then(function (r) {
+      if (r.error) throw r.error;
+      if (!r.data) throw new Error('Restaurant introuvable.');
+      applyRestaurant(r.data);
+      subscribeRestaurant();
+      return loadOrders();
+    }).then(function () {
+      sb.channel('tapigo-orders-' + current.id)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: 'restaurant_id=eq.' + current.id }, function (p) {
           if (p.eventType === 'DELETE') {
             cache.orders = cache.orders.filter(function (o) { return !p.old || o.id !== p.old.id; });
             emit('orders:sync', null);
@@ -282,32 +363,43 @@
       // Filet de sécurité si l'écran s'est mis en veille.
       document.addEventListener('visibilitychange', function () { if (!document.hidden) loadOrders().catch(fail); });
       setInterval(function () { loadOrders().catch(fail); }, 60000);
-
-      // Premier lancement : la carte de démonstration sert de point de départ.
-      if (!cache.menu && window.TAPIGO_DEMO) {
-        var d = window.TAPIGO_DEMO;
-        cache.menu = { categories: d.categories, tags: d.tags, items: d.items };
-        emit('menu:updated', null);
-        return persist({ menu: cache.menu });
-      }
     });
+  };
+
+  /* ---------------- Administration Tapigo ---------------- */
+  function rpc(name, args) {
+    return sb.rpc(name, args || {}).then(function (r) {
+      if (r.error) throw new Error(r.error.message);
+      return r.data;
+    });
+  }
+
+  T.admin = {
+    listRestaurants: function () {
+      return sb.from('restaurants').select('id, slug, info, active, created_at, menu')
+        .order('created_at', { ascending: true })
+        .then(function (r) {
+          if (r.error) throw r.error;
+          return r.data.map(function (x) {
+            return {
+              id: x.id, slug: x.slug, active: x.active,
+              info: Object.assign(clone(DEFAULT_INFO), x.info || {}),
+              items: (x.menu && x.menu.items) ? x.menu.items.length : 0
+            };
+          });
+        });
+    },
+    createRestaurant: function (name, slug, tables, menu) {
+      return rpc('admin_create_restaurant', { p_name: name, p_slug: slug, p_tables: tables, p_menu: menu || null });
+    },
+    setActive: function (id, active) { return rpc('admin_set_active', { p_restaurant: id, p_active: active }); },
+    listMembers: function (id) { return rpc('admin_list_members', { p_restaurant: id }); },
+    addMember: function (id, email, role) { return rpc('admin_add_member', { p_restaurant: id, p_email: email, p_role: role }); },
+    removeMember: function (id, userId) { return rpc('admin_remove_member', { p_restaurant: id, p_user: userId }); }
   };
 
   /* ---------------- Démarrage ---------------- */
   T.ready = loadScript(SUPABASE_JS).then(function () {
     sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
-    return sb.from('restaurant').select('info, menu').eq('id', 1).maybeSingle();
-  }).then(function (r) {
-    if (r.error) throw new Error('Base de données inaccessible : ' + r.error.message);
-    if (r.data) applyRestaurant(r.data);
-
-    // La carte se met à jour en direct chez les clients quand le restaurateur la modifie.
-    sb.channel('tapigo-restaurant')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'restaurant' }, function (p) {
-        applyRestaurant(p.new, pendingMenuWrites > 0);
-        emit('menu:updated', null);
-        emit('restaurant:updated', clone(cache.info));
-      })
-      .subscribe();
   });
 })();

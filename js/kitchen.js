@@ -182,8 +182,8 @@
   function announce(order) {
     if (state.sound) UI.chime();
     UI.vibrate([80, 60, 80]);
-    UI.toast('🔔 <span><strong>Nouvelle commande · Table ' + esc(order.table) + '</strong><br>' +
-      order.lines.map(function (l) { return l.qty + '× ' + esc(l.name); }).join(', ') + '</span>', 5000);
+    UI.toast('🔔 <strong>Nouvelle commande · Table ' + esc(order.table) + '</strong><br>' +
+      order.lines.map(function (l) { return l.qty + '× ' + esc(l.name); }).join(', '), 5000);
   }
 
   /* Simule un client qui commande depuis sa table (démo). */
@@ -218,6 +218,17 @@
     var menu = T.getMenu();
     var q = norm(state.q);
     var off = menu.items.filter(function (i) { return i.available === false; }).length;
+
+    if (LIVE && !menu.items.length) {
+      $('#menuView').innerHTML = '<div class="editor"><div class="empty"><h3>La carte est vide</h3>' +
+        '<p>Partez de la carte de démonstration et adaptez-la, ou ajoutez vos plats un par un.</p>' +
+        '<p style="margin-top:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">' +
+          '<button class="btn btn--primary" type="button" data-import-demo>Importer la carte de démonstration</button>' +
+          '<button class="btn btn--ghost" type="button" data-new>Ajouter un plat</button>' +
+          '<button class="btn btn--ghost" type="button" data-settings>Établissement</button></p></div></div>';
+      return;
+    }
+    if (!menu.categories.length) menu.categories = window.TAPIGO_DEMO.categories;
 
     var html = '<div class="editor">' +
       '<div class="editor__bar">' +
@@ -285,6 +296,7 @@
 
   function openItemForm(id) {
     var menu = T.getMenu();
+    if (!menu.categories.length) { menu.categories = window.TAPIGO_DEMO.categories; menu.tags = window.TAPIGO_DEMO.tags; }
     var item = id ? T.getItem(id) : { name: '', description: '', price: '', category: menu.categories[0].id, station: 'cuisine', image: '', emoji: '🍽️', tags: [], allergens: '', available: true, options: [] };
     if (!item) return;
     var tags = menu.tags || {};
@@ -371,8 +383,10 @@
 
   function nfcLinks(n) {
     var base = location.href.replace(/kitchen\.html.*$/, 'menu.html');
+    var cur = LIVE && T.currentRestaurant();
+    var prefix = base + '?' + (cur ? 'r=' + cur.slug + '&' : '') + 'table=';
     var out = [];
-    for (var i = 1; i <= n; i++) out.push('Table ' + i + ' : ' + base + '?table=' + i);
+    for (var i = 1; i <= n; i++) out.push('Table ' + i + ' : ' + prefix + i);
     return out.join('\n');
   }
 
@@ -514,6 +528,11 @@
       if (e.key === 'Enter' && e.target.matches('[data-price]')) e.target.blur();
     });
     menuView.addEventListener('click', function (e) {
+      if (e.target.closest('[data-import-demo]')) {
+        var d = window.TAPIGO_DEMO;
+        T.replaceMenu({ categories: d.categories, tags: d.tags, items: d.items });
+        return UI.toast('Carte de démonstration importée : adaptez-la à votre restaurant');
+      }
       if (e.target.closest('[data-new]')) return openItemForm(null);
       if (e.target.closest('[data-settings]')) return openSettings();
       if (e.target.closest('[data-reset]')) {
@@ -548,9 +567,28 @@
   /* ======================================================================
      Démarrage & connexion (mode en ligne)
      ====================================================================== */
+  var ROLE_LABEL = { admin: 'Admin Tapigo', owner: 'Gérant', equipe: 'Équipe' };
+  var CHOICE_KEY = 'tapigo.v1.kitchen.restaurant';
+  var myRestaurants = [];
+
   function start() {
     $('#simulateBtn').hidden = LIVE;
     $('#logoutBtn').hidden = !LIVE;
+    if (LIVE) {
+      var cur = T.currentRestaurant();
+      // L'équipe ne gère que les commandes.
+      document.querySelector('.k-tab[data-view="menu"]').hidden = cur.role === 'equipe';
+      var sub = document.querySelector('.k-brand p');
+      sub.textContent = ROLE_LABEL[cur.role] + ' · Cuisine & Bar';
+      if (myRestaurants.length > 1) {
+        sub.innerHTML = '<a href="#" id="switchRestaurant" style="color:inherit">' + esc(ROLE_LABEL[cur.role]) + ' · Changer de restaurant</a>';
+        $('#switchRestaurant').addEventListener('click', function (e) {
+          e.preventDefault();
+          try { localStorage.removeItem(CHOICE_KEY); } catch (err) { /* ignore */ }
+          location.href = location.pathname;
+        });
+      }
+    }
     renderBrand();
     renderSound();
     bind();
@@ -569,20 +607,66 @@
     btn.textContent = 'Se connecter';
   }
 
-  function enter() {
-    return T.startStaff().then(function () {
+  function enter(restaurant) {
+    try { localStorage.setItem(CHOICE_KEY, restaurant.slug); } catch (e) { /* ignore */ }
+    return T.startStaff(restaurant).then(function () {
       $('#login').hidden = true;
       $('.kds').hidden = false;
       start();
     });
   }
 
+  function showPicker(list) {
+    var form = $('#loginForm');
+    $('#login').hidden = false;
+    form.innerHTML = '<div class="logo" aria-hidden="true">T</div><p class="eyebrow">Espace restaurateur</p><h1>Quel restaurant ?</h1>' +
+      '<div class="order-list">' + list.map(function (r) {
+        return '<button class="order-link" type="button" data-pick="' + esc(r.id) + '"><span><strong>' + esc(r.name) + '</strong><br>' +
+          '<small style="color:var(--muted)">' + esc(r.slug) + (r.active ? '' : ' · désactivé') + '</small></span>' +
+          '<span class="badge">' + esc(ROLE_LABEL[r.role] || r.role) + '</span></button>';
+      }).join('') + '</div>' +
+      '<button class="link-btn" type="button" id="pickerLogout">Se déconnecter</button>';
+    form.onsubmit = function (e) { e.preventDefault(); };
+    form.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-pick]');
+      if (b) enter(list.filter(function (r) { return r.id === b.dataset.pick; })[0]).catch(fatal);
+      if (e.target.closest('#pickerLogout')) T.auth.signOut().then(function () { location.reload(); });
+    });
+  }
+
   function checkAccess() {
-    return T.auth.isStaff().then(function (ok) {
-      if (ok) return enter();
-      return T.auth.signOut().then(function () {
-        showLogin('Ce compte n’a pas accès au tableau de bord. Ajoutez-le à l’équipe (table « staff » dans Supabase).');
-      });
+    return T.auth.myRestaurants().then(function (list) {
+      myRestaurants = list;
+      if (!list.length) {
+        return T.auth.signOut().then(function () {
+          showLogin('Ce compte n’est rattaché à aucun restaurant. Demandez l’accès à l’équipe Tapigo.');
+        });
+      }
+      var wanted = new URLSearchParams(location.search).get('r');
+      var saved = null;
+      try { saved = localStorage.getItem(CHOICE_KEY); } catch (e) { /* ignore */ }
+      var pick = function (slug) { return list.filter(function (r) { return r.slug === slug; })[0]; };
+      var choice = (wanted && pick(wanted)) || (list.length === 1 ? list[0] : (saved && pick(saved)));
+      if (choice) return enter(choice);
+      showPicker(list);
+    });
+  }
+
+  function fatal(err) {
+    $('#login').hidden = false;
+    $('#loginForm').innerHTML = '<div class="logo" aria-hidden="true">T</div><h1>Connexion impossible</h1><p class="login__error">' + esc(err.message) + '</p>' +
+      '<button class="btn btn--primary btn--block" type="button" onclick="location.reload()">Réessayer</button>';
+  }
+
+  function openAccount() {
+    UI.openAccount({
+      onSwitch: myRestaurants.length > 1 ? function () {
+        try { localStorage.removeItem(CHOICE_KEY); } catch (err) { /* ignore */ }
+        location.href = location.pathname;
+      } : null,
+      onLogout: function () {
+        try { localStorage.removeItem(CHOICE_KEY); } catch (err) { /* ignore */ }
+      }
     });
   }
 
@@ -599,9 +683,7 @@
         .then(checkAccess)
         .catch(function (err) { showLogin(err.message); });
     });
-    $('#logoutBtn').addEventListener('click', function () {
-      T.auth.signOut().then(function () { location.reload(); });
-    });
+    $('#logoutBtn').addEventListener('click', openAccount);
 
     return T.auth.session().then(function (session) {
       if (session) return checkAccess();
@@ -609,9 +691,5 @@
     });
   }
 
-  T.ready.then(boot).catch(function (err) {
-    $('#login').hidden = false;
-    $('#loginForm').innerHTML = '<div class="logo" aria-hidden="true">T</div><h1>Connexion impossible</h1><p class="login__error">' + esc(err.message) + '</p>' +
-      '<button class="btn btn--primary btn--block" type="button" onclick="location.reload()">Réessayer</button>';
-  });
+  T.ready.then(boot).catch(fatal);
 })();

@@ -53,7 +53,7 @@
     }
     var el = document.createElement('div');
     el.className = 'toast';
-    el.innerHTML = html;
+    el.innerHTML = '<span>' + html + '</span>';
     stack.appendChild(el);
     setTimeout(function () {
       el.classList.add('is-leaving');
@@ -183,7 +183,54 @@
 
   function vibrate(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
+  /* ---------------- Mon compte (mode en ligne) ---------------- */
+  // opts : { onSwitch: fn | null, onLogout: fn }
+  function openAccount(opts) {
+    opts = opts || {};
+    var T = window.Tapigo, esc = T.esc;
+    T.auth.session().then(function (session) {
+      var email = session && session.user ? session.user.email : '';
+      openSheet({
+        label: 'Mon compte',
+        head: '<p class="eyebrow">' + esc(email) + '</p><h2>Mon compte</h2>',
+        body:
+          '<form id="pwForm" class="form-grid" novalidate>' +
+            '<label class="field span-2"><span>Nouveau mot de passe</span><input type="password" name="pw" autocomplete="new-password" minlength="8" required></label>' +
+            '<label class="field span-2"><span>Confirmer le mot de passe</span><input type="password" name="pw2" autocomplete="new-password" required></label>' +
+            '<p class="help span-2">8 caractères minimum.</p>' +
+            '<button class="btn btn--primary span-2" type="submit">Changer le mot de passe</button>' +
+          '</form>' +
+          (opts.onSwitch ? '<button class="btn btn--ghost btn--block" type="button" id="accSwitch">Changer de restaurant</button>' : '') +
+          '<button class="btn btn--danger btn--block" type="button" id="accLogout">Se déconnecter</button>',
+        onMount: function (sheet) {
+          sheet.querySelector('#pwForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            var f = e.target.elements;
+            if (f.pw.value.length < 8) return toast('Mot de passe trop court (8 caractères minimum)');
+            if (f.pw.value !== f.pw2.value) return toast('Les deux mots de passe ne correspondent pas');
+            var btn = e.target.querySelector('button[type=submit]');
+            btn.disabled = true;
+            T.auth.changePassword(f.pw.value).then(function () {
+              closeSheet();
+              toast('Mot de passe modifié');
+            }).catch(function (err) {
+              btn.disabled = false;
+              toast(esc(err.message), 4500);
+            });
+          });
+          var sw = sheet.querySelector('#accSwitch');
+          if (sw) sw.addEventListener('click', opts.onSwitch);
+          sheet.querySelector('#accLogout').addEventListener('click', function () {
+            if (opts.onLogout) opts.onLogout();
+            T.auth.signOut().then(function () { location.href = location.pathname; });
+          });
+        }
+      });
+    });
+  }
+
   window.TapigoUI = {
+    openAccount: openAccount,
     ICONS: ICONS,
     media: media,
     toast: toast,

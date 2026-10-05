@@ -553,6 +553,8 @@ img { display: block; max-width: 100%; }
 .login__card .field { text-align: left; }
 .login__error { padding: 10px 12px; border-radius: var(--r-sm); background: var(--danger-soft); color: var(--danger); font-size: 13px; font-weight: 600; text-align: left; }
 
+.form-grid.member-form { grid-template-columns: 1fr 150px auto; align-items: end; }
+
 /* Éditeur de menu */
 .editor { max-width: 980px; margin: 0 auto; display: grid; gap: 22px; }
 .editor__bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -601,7 +603,7 @@ img { display: block; max-width: 100%; }
   .editor-row__thumb { width: 48px; height: 48px; }
   .editor-row__toggle, .editor-row__actions { grid-column: 2 / -1; }
   .editor-row__toggle { justify-self: start; }
-  .form-grid, .optgroup-edit { grid-template-columns: 1fr; }
+  .form-grid, .optgroup-edit, .form-grid.member-form { grid-template-columns: 1fr; }
   .k-btn-label { display: none; }
 }
 @media (max-width: 380px) {

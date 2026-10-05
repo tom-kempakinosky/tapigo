@@ -12,7 +12,8 @@
   /* ---------------- Table détectée depuis l'URL NFC ---------------- */
   var params = new URLSearchParams(location.search);
   var table = (params.get('table') || '').replace(/[^0-9A-Za-z-]/g, '').slice(0, 6) || null;
-  var scope = table || 'none';
+  var slug = (params.get('r') || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40) || null;
+  var scope = (slug ? slug + ':' : '') + (table || 'none');
   var CART_KEY = 'tapigo.v1.cart.' + scope;
   var NOTE_KEY = 'tapigo.v1.cartnote.' + scope;
   var MINE_KEY = 'tapigo.v1.mine.' + scope;
@@ -536,10 +537,14 @@
       saveCart();
       if (!table) {
         // Mémorise la table saisie pour la suite de la session.
-        table = tableNo; scope = tableNo;
+        table = tableNo; scope = (slug ? slug + ':' : '') + tableNo;
         CART_KEY = 'tapigo.v1.cart.' + scope; NOTE_KEY = 'tapigo.v1.cartnote.' + scope; MINE_KEY = 'tapigo.v1.mine.' + scope;
         state.mine = T.read(MINE_KEY, []);
-        try { history.replaceState(null, '', '?table=' + encodeURIComponent(tableNo)); } catch (e) { /* ignore */ }
+        try {
+          var q = new URLSearchParams(location.search);
+          q.set('table', tableNo);
+          history.replaceState(null, '', '?' + q.toString());
+        } catch (e) { /* ignore */ }
         renderHeader();
       }
       state.mine.push(order.id);
@@ -783,8 +788,24 @@
     T.track(state.mine);
   }
 
-  T.ready.then(start, function (err) {
-    $('#menu').innerHTML = '<div class="empty"><h3>Menu momentanément indisponible</h3><p>' + esc(err.message) + '</p>' +
-      '<p style="margin-top:16px"><button class="btn btn--primary" type="button" onclick="location.reload()">Réessayer</button></p></div>';
+  T.ready.then(function () {
+    return LIVE ? T.openRestaurant(slug) : null;
+  }).then(function () {
+    // L'adresse canonique contient l'identifiant du restaurant.
+    var cur = LIVE && T.currentRestaurant();
+    if (cur && !slug) {
+      slug = cur.slug;
+      try {
+        var q = new URLSearchParams(location.search);
+        q.set('r', slug);
+        history.replaceState(null, '', '?' + q.toString());
+      } catch (e) { /* ignore */ }
+    }
+    start();
+  }).catch(function (err) {
+    var lost = err && err.code === 'NOT_FOUND';
+    $('#rName').textContent = lost ? 'Tapigo' : 'Menu';
+    $('#menu').innerHTML = '<div class="empty"><h3>' + (lost ? 'Restaurant introuvable' : 'Menu momentanément indisponible') + '</h3><p>' + esc(err.message) + '</p>' +
+      (lost ? '' : '<p style="margin-top:16px"><button class="btn btn--primary" type="button" onclick="location.reload()">Réessayer</button></p>') + '</div>';
   });
 })();
