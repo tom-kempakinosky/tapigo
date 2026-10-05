@@ -50,9 +50,17 @@
     });
   }
 
-  function notFound() {
-    var e = new Error('Restaurant introuvable. Scannez à nouveau la plaque NFC de votre table.');
+  // reason : 'old-link' (plaque sans ?r= alors qu'il y a plusieurs restaurants),
+  //          'unknown' (identifiant inexistant) ou 'closed' (restaurant désactivé).
+  function notFound(reason, slug) {
+    var msg = reason === 'old-link'
+      ? 'Ce lien ne précise pas le restaurant (ancien format, sans « ?r= »). Reprogrammez la plaque NFC avec le lien copié depuis l’espace admin.'
+      : reason === 'closed'
+        ? 'Le restaurant « ' + slug + ' » est momentanément fermé aux commandes en ligne.'
+        : 'Aucun restaurant ne correspond à l’identifiant « ' + slug + ' ». Vérifiez le lien de la plaque NFC.';
+    var e = new Error(msg);
     e.code = 'NOT_FOUND';
+    e.reason = reason;
     return e;
   }
 
@@ -236,12 +244,14 @@
   /* ---------------- Côté client ---------------- */
   // slug absent (ancienne plaque sans ?r=) : accepté s'il n'existe qu'un restaurant.
   T.openRestaurant = function (slug) {
-    var q = sb.from('restaurants').select('id, slug, info, menu').eq('active', true);
-    q = slug ? q.eq('slug', slug).limit(1) : q.limit(2);
+    var q = sb.from('restaurants').select('id, slug, info, menu, active');
+    q = slug ? q.eq('slug', slug).limit(1) : q.eq('active', true).limit(2);
     return q.then(function (r) {
       if (r.error) throw new Error('Base de données inaccessible : ' + r.error.message);
       var rows = r.data || [];
-      if (!rows.length || (!slug && rows.length > 1)) throw notFound();
+      if (!slug && rows.length !== 1) throw notFound(rows.length ? 'old-link' : 'closed', '');
+      if (!rows.length) throw notFound('unknown', slug);
+      if (!rows[0].active) throw notFound('closed', slug);
       current = { id: rows[0].id, slug: rows[0].slug, role: null };
       applyRestaurant(rows[0]);
       subscribeRestaurant();

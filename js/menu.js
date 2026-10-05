@@ -804,8 +804,13 @@
     start();
   }).catch(function (err) {
     var lost = err && err.code === 'NOT_FOUND';
+    var title = !lost ? 'Menu momentanément indisponible'
+      : err.reason === 'closed' ? 'Commandes en pause'
+      : err.reason === 'old-link' ? 'Lien à mettre à jour'
+      : 'Restaurant introuvable';
     $('#rName').textContent = lost ? 'Tapigo' : 'Menu';
-    $('#menu').innerHTML = '<div class="empty"><h3>' + (lost ? 'Restaurant introuvable' : 'Menu momentanément indisponible') + '</h3><p>' + esc(err.message) + '</p>' +
-      (lost ? '' : '<p style="margin-top:16px"><button class="btn btn--primary" type="button" onclick="location.reload()">Réessayer</button></p>') + '</div>';
+    $('#menu').innerHTML = '<div class="empty"><h3>' + title + '</h3><p>' + esc(err.message) + '</p>' +
+      (err && err.reason === 'old-link' ? '' : '<p style="margin-top:16px"><button class="btn btn--primary" type="button" onclick="location.reload()">Réessayer</button></p>') +
+      '<p class="help" style="margin-top:18px;word-break:break-all">' + esc(location.href) + '</p></div>';
   });
 })();
