@@ -98,14 +98,22 @@
     if (!skipMenu) cache.menu = row.menu || null;
   }
 
+  // La carte se met à jour en direct quand le restaurateur la modifie.
+  // On ne se fie PAS au contenu de l'événement : Supabase peut omettre les
+  // colonnes volumineuses inchangées (la carte), ce qui la ferait paraître
+  // vide. On relit donc la fiche complète, sans écraser une écriture en cours.
+  var refreshTimer = null;
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(function () {
+      if (pendingMenuWrites > 0) return scheduleRefresh();
+      refreshRestaurant().catch(function () {});
+    }, 400);
+  }
+
   function subscribeRestaurant() {
-    // La carte se met à jour en direct quand le restaurateur la modifie.
     sb.channel('tapigo-restaurant-' + current.id)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'restaurants', filter: 'id=eq.' + current.id }, function (p) {
-        applyRestaurant(p.new, pendingMenuWrites > 0);
-        emit('menu:updated', null);
-        emit('restaurant:updated', clone(cache.info));
-      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'restaurants', filter: 'id=eq.' + current.id }, scheduleRefresh)
       .subscribe();
   }
 
@@ -128,7 +136,11 @@
   function refreshRestaurant() {
     return sb.from('restaurants').select('info, menu').eq('id', current.id).maybeSingle().then(function (r) {
       if (r.error) throw r.error;
-      if (r.data) applyRestaurant(r.data);
+      if (!r.data) return;
+      var before = JSON.stringify([cache.info, cache.menu]);
+      applyRestaurant(r.data);
+      // Rien n'a changé (ex. simple compteur) : on ne touche pas à l'écran.
+      if (JSON.stringify([cache.info, cache.menu]) === before) return;
       emit('menu:updated', null);
       emit('restaurant:updated', clone(cache.info));
     });

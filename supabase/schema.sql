@@ -114,6 +114,7 @@ drop function if exists public.is_staff();
 delete from public.orders where restaurant_id is null;
 alter table public.orders alter column restaurant_id set not null;
 create index if not exists orders_restaurant_created_idx on public.orders (restaurant_id, created_at desc);
+create index if not exists orders_restaurant_number_idx on public.orders (restaurant_id, number desc);
 drop index if exists public.orders_created_at_idx;
 
 -- ---------- Droits ----------
@@ -275,10 +276,15 @@ begin
     v_total := v_total + v_unit * v_qty;
   end loop;
 
-  -- Numéro de commande propre à chaque restaurant (verrou sur la ligne).
-  update public.restaurants set next_number = next_number + 1
-  where id = v_rid
-  returning next_number - 1 into v_number;
+  -- Numéro de commande propre à chaque restaurant. On ne modifie PAS la fiche
+  -- du restaurant (sinon chaque commande serait diffusée à tous les clients
+  -- connectés) : un verrou par restaurant évite les doublons.
+  perform pg_advisory_xact_lock(hashtext('tapigo-order-' || v_rid::text));
+  select greatest(coalesce(max(o.number) + 1, 0), r.next_number) into v_number
+  from public.restaurants r
+  left join public.orders o on o.restaurant_id = r.id
+  where r.id = v_rid
+  group by r.next_number;
 
   insert into public.orders (restaurant_id, number, table_label, lines, note, total)
   values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), round(v_total, 2))
