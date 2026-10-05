@@ -45,7 +45,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 ### Ajouter un restaurant
 1. Ouvrez `admin.html` et cliquez sur **Créer un restaurant** (nom, identifiant, nombre de tables, carte de départ).
 2. Créez le compte du restaurateur dans Supabase (**Authentication → Users → Add user**, « Auto Confirm User »).
-3. Dans `admin.html`, saisissez son e-mail, cliquez sur **Donner l'accès**, puis **Copier les liens NFC** pour programmer les plaques.
+3. Dans `admin.html`, saisissez son e-mail, cliquez sur **Donner l’accès**, puis **Copier le lien NFC** : ce lien unique (`menu.html?r=<restaurant>`) s’écrit sur toutes les plaques du restaurant, et le client indique lui-même son numéro de table.
 4. Envoyez-lui le lien `kitchen.html`, son e-mail et son mot de passe provisoire. Il le change ensuite dans **Mon compte**.
 
 ## Fonctionnalités

@@ -12,13 +12,8 @@
 
   function baseUrl(page) { return location.href.replace(/admin\.html.*$/, page); }
 
-  function nfcLinks(r) {
-    var out = [];
-    for (var i = 1; i <= (r.info.tables || 12); i++) {
-      out.push('Table ' + i + ' : ' + baseUrl('menu.html') + '?r=' + r.slug + '&table=' + i);
-    }
-    return out.join('\n');
-  }
+  // Un seul lien par restaurant : le client saisit son numéro de table.
+  function nfcLink(r) { return baseUrl('menu.html') + '?r=' + r.slug; }
 
   function toSlug(name) { return T._slug(name).replace(/-+$/, ''); }
 
@@ -31,7 +26,7 @@
         '<label class="field"><span>Identifiant (dans le lien NFC)</span><input name="slug" maxlength="40" required placeholder="chez-marco" pattern="[a-z0-9-]+"></label>' +
         '<label class="field"><span>Nombre de tables</span><input name="tables" inputmode="numeric" value="12"></label>' +
         '<label class="switch" style="align-self:end;padding-bottom:12px"><input type="checkbox" name="demo" checked><span class="switch__track"></span><span>Partir de la carte de démonstration</span></label>' +
-        '<p class="help span-2">Lien client : <code id="slugPreview">' + esc(baseUrl('menu.html')) + '?r=…&amp;table=1</code></p>' +
+        '<p class="help span-2">Lien NFC : <code id="slugPreview">' + esc(baseUrl('menu.html')) + '?r=…</code></p>' +
         '<button class="btn btn--primary span-2" type="submit">Créer le restaurant</button>' +
       '</form></section>';
   }
@@ -46,10 +41,12 @@
         '<label class="switch" title="Un restaurant désactivé ne peut plus recevoir de commandes"><input type="checkbox" data-active' + (r.active ? ' checked' : '') + '><span class="switch__track"></span><span>Actif</span></label>' +
       '</div>' +
       '<div class="check-row">' +
-        '<a class="btn btn--ghost btn--sm" target="_blank" rel="noopener" href="menu.html?r=' + esc(r.slug) + '&amp;table=1">Menu client</a>' +
+        '<a class="btn btn--ghost btn--sm" target="_blank" rel="noopener" href="menu.html?r=' + esc(r.slug) + '">Menu client</a>' +
         '<a class="btn btn--ghost btn--sm" href="kitchen.html?r=' + esc(r.slug) + '">Dashboard</a>' +
-        '<button class="btn btn--soft btn--sm" type="button" data-copy-links>Copier les liens NFC</button>' +
+        '<button class="btn btn--soft btn--sm" type="button" data-copy-links>Copier le lien NFC</button>' +
       '</div>' +
+      '<p class="help">Lien à écrire sur <strong>toutes</strong> les plaques NFC du restaurant (le client indique sa table) :<br>' +
+        '<code style="word-break:break-all">' + esc(nfcLink(r)) + '</code></p>' +
       '<div><p class="eyebrow" style="margin-bottom:8px">Accès</p><div class="order-list" data-members><p class="help">Chargement…</p></div></div>' +
       '<form class="form-grid member-form" data-add-member novalidate>' +
         '<label class="field"><span>E-mail du compte</span><input type="email" name="email" required placeholder="gerant@restaurant.fr"></label>' +
@@ -102,7 +99,7 @@
         e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-{2,}/g, '-');
       }
       if (e.target.name === 'name' && !slugTouched) form.elements.slug.value = toSlug(e.target.value);
-      $('#slugPreview').textContent = baseUrl('menu.html') + '?r=' + (form.elements.slug.value || '…') + '&table=1';
+      $('#slugPreview').textContent = baseUrl('menu.html') + '?r=' + (form.elements.slug.value || '…');
     });
 
     view.addEventListener('submit', function (e) {
@@ -147,10 +144,10 @@
       var r = restaurants.filter(function (x) { return x.id === card.dataset.rid; })[0];
 
       if (e.target.closest('[data-copy-links]')) {
-        var text = nfcLinks(r);
-        var ok = function () { UI.toast('Liens NFC de <strong>' + esc(r.info.name) + '</strong> copiés'); };
-        if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, function () { window.prompt('Liens NFC', text); });
-        else window.prompt('Liens NFC', text);
+        var text = nfcLink(r);
+        var ok = function () { UI.toast('Lien NFC de <strong>' + esc(r.info.name) + '</strong> copié'); };
+        if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, function () { window.prompt('Lien NFC', text); });
+        else window.prompt('Lien NFC', text);
       }
 
       var rm = e.target.closest('[data-remove]');

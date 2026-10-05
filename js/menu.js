@@ -13,7 +13,7 @@
   var params = new URLSearchParams(location.search);
   var table = (params.get('table') || '').replace(/[^0-9A-Za-z-]/g, '').slice(0, 6) || null;
   var slug = (params.get('r') || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40) || null;
-  var scope = (slug ? slug + ':' : '') + (table || 'none');
+  var scope = slug || 'default';
   var CART_KEY = 'tapigo.v1.cart.' + scope;
   var NOTE_KEY = 'tapigo.v1.cartnote.' + scope;
   var MINE_KEY = 'tapigo.v1.mine.' + scope;
@@ -48,10 +48,77 @@
     var badge = $('#tableBadge');
     badge.className = 'table-badge' + (table ? '' : ' table-badge--missing');
     badge.innerHTML = '<small>Table</small><b>' + (table ? esc(table) : '—') + '</b>';
+    badge.setAttribute('aria-label', table ? 'Table ' + table + ', modifier' : 'Indiquer votre numéro de table');
 
     $('#welcome').innerHTML = I.nfc + (table
-      ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>. Composez votre commande : elle part directement en cuisine.</p>'
-      : '<p><strong>Table non détectée.</strong> Approchez votre téléphone du tag NFC de votre table, ou indiquez son numéro au moment de commander.</p>');
+      ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>. Composez votre commande : elle part directement en cuisine. ' +
+        '<button class="link-btn" type="button" data-change-table>Changer de table</button></p>'
+      : '<p><strong>Bienvenue !</strong> Indiquez votre numéro de table pour pouvoir commander. ' +
+        '<button class="link-btn" type="button" data-change-table>Indiquer ma table</button></p>');
+  }
+
+  /* ======================================================================
+     Numéro de table saisi par le client (une seule plaque NFC par restaurant)
+     ====================================================================== */
+  function tableCount() { return Math.max(1, parseInt(state.restaurant.tables, 10) || 12); }
+
+  // Renvoie un message d'erreur, ou null si le numéro est valide.
+  function tableError(value) {
+    if (!value) return 'Indiquez votre numéro de table';
+    if (/^\d+$/.test(value)) {
+      var n = parseInt(value, 10);
+      if (n < 1 || n > tableCount()) return 'La table ' + value + ' n’existe pas ici (tables 1 à ' + tableCount() + ')';
+    }
+    return null;
+  }
+
+  function setTable(value) {
+    table = String(parseInt(value, 10) || value);
+    try {
+      var q = new URLSearchParams(location.search);
+      q.set('table', table);
+      history.replaceState(null, '', '?' + q.toString());
+      sessionStorage.setItem('tapigo.v1.table.' + scope, table);
+    } catch (e) { /* ignore */ }
+    renderHeader();
+  }
+
+  function openTablePicker(onDone) {
+    UI.openSheet({
+      label: 'Numéro de table',
+      head: '<p class="eyebrow">' + esc(state.restaurant.name) + '</p><h2>Quelle est votre table ?</h2>',
+      body:
+        '<p class="product-desc">Le numéro est indiqué sur votre table.</p>' +
+        '<form id="tableForm" novalidate>' +
+          '<input class="input table-input" id="tablePick" inputmode="numeric" pattern="[0-9]*" maxlength="4" ' +
+            'placeholder="N°" aria-label="Numéro de table" value="' + esc(table || '') + '" autofocus>' +
+          '<p class="login__error" id="tableErr" role="alert" hidden></p>' +
+        '</form>',
+      footer: '<button class="btn btn--primary" type="submit" form="tableForm">' + (table ? 'Valider' : 'Voir la carte et commander') + '</button>',
+      onMount: function (sheet) {
+        var input = $('#tablePick', sheet);
+        input.addEventListener('input', function () {
+          input.value = input.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 4);
+          $('#tableErr', sheet).hidden = true;
+        });
+        $('#tableForm', sheet).addEventListener('submit', function (e) {
+          e.preventDefault();
+          var v = input.value.trim();
+          var err = tableError(v);
+          if (err) {
+            $('#tableErr', sheet).textContent = err;
+            $('#tableErr', sheet).hidden = false;
+            UI.vibrate(40);
+            return input.focus();
+          }
+          setTable(v);
+          UI.closeSheet().then(function () {
+            UI.toast('Table <strong>' + esc(table) + '</strong> enregistrée');
+            if (onDone) onDone();
+          });
+        });
+      }
+    });
   }
 
   /* ======================================================================
@@ -458,7 +525,8 @@
 
         btn.addEventListener('click', function () {
           var tableNo = table || ($('#tableInput', sheet) && $('#tableInput', sheet).value.trim());
-          if (!tableNo) return invalid($('#tableInput', sheet), 'Indiquez votre numéro de table');
+          var tErr = tableError(tableNo);
+          if (tErr) return invalid($('#tableInput', sheet), tErr);
           if (state.payMethod === 'card') {
             var num = $('#ccNum', sheet), exp = $('#ccExp', sheet), cvc = $('#ccCvc', sheet);
             if (!luhn(num.value.replace(/\s/g, ''))) return invalid(num, 'Numéro de carte invalide');
@@ -535,18 +603,7 @@
     }).then(function (order) {
       state.cart = []; state.note = '';
       saveCart();
-      if (!table) {
-        // Mémorise la table saisie pour la suite de la session.
-        table = tableNo; scope = (slug ? slug + ':' : '') + tableNo;
-        CART_KEY = 'tapigo.v1.cart.' + scope; NOTE_KEY = 'tapigo.v1.cartnote.' + scope; MINE_KEY = 'tapigo.v1.mine.' + scope;
-        state.mine = T.read(MINE_KEY, []);
-        try {
-          var q = new URLSearchParams(location.search);
-          q.set('table', tableNo);
-          history.replaceState(null, '', '?' + q.toString());
-        } catch (e) { /* ignore */ }
-        renderHeader();
-      }
+      if (!table) setTable(tableNo);
       state.mine.push(order.id);
       T.write(MINE_KEY, state.mine);
       T.track(order.id);
@@ -786,6 +843,18 @@
     renderTrackPill();
     bind();
     T.track(state.mine);
+
+    $('#tableBadge').addEventListener('click', function () { openTablePicker(); });
+    $('#welcome').addEventListener('click', function (e) {
+      if (e.target.closest('[data-change-table]')) openTablePicker();
+    });
+    if (table && tableError(table)) { table = null; renderHeader(); }
+    if (!table) {
+      var saved = null;
+      try { saved = sessionStorage.getItem('tapigo.v1.table.' + scope); } catch (e) { /* ignore */ }
+      if (saved && !tableError(saved)) setTable(saved);
+      else openTablePicker();
+    }
   }
 
   T.ready.then(function () {

@@ -381,13 +381,11 @@
     });
   }
 
-  function nfcLinks(n) {
+  // Un seul lien pour toutes les plaques : le client saisit son numéro de table.
+  function nfcLink() {
     var base = location.href.replace(/kitchen\.html.*$/, 'menu.html');
     var cur = LIVE && T.currentRestaurant();
-    var prefix = base + '?' + (cur ? 'r=' + cur.slug + '&' : '') + 'table=';
-    var out = [];
-    for (var i = 1; i <= n; i++) out.push('Table ' + i + ' : ' + prefix + i);
-    return out.join('\n');
+    return base + (cur ? '?r=' + cur.slug : '');
   }
 
   function openSettings() {
@@ -401,21 +399,17 @@
           '<label class="field span-2"><span>Accroche</span><input name="tagline" maxlength="80" value="' + esc(r.tagline || '') + '"></label>' +
           '<label class="field"><span>Nombre de tables</span><input name="tables" inputmode="numeric" value="' + (r.tables || 12) + '"></label>' +
           '<label class="field"><span>Lettre du logo</span><input name="logoLetter" maxlength="1" value="' + esc(r.logoLetter || r.name.charAt(0)) + '"></label>' +
-          '<label class="field span-2"><span>Liens à programmer sur les plaques NFC (une par table)</span>' +
-            '<textarea id="nfcLinks" readonly rows="6" style="font-size:12px;font-family:ui-monospace,Menlo,monospace">' + esc(nfcLinks(r.tables || 12)) + '</textarea>' +
-            '<button class="btn btn--soft btn--sm" type="button" id="copyLinks" style="justify-self:start">Copier les liens</button></label>' +
+          '<label class="field span-2"><span>Lien à écrire sur toutes les plaques NFC (le client indique sa table)</span>' +
+            '<input id="nfcLinks" readonly value="' + esc(nfcLink()) + '" style="font-size:13px;font-family:ui-monospace,Menlo,monospace">' +
+            '<button class="btn btn--soft btn--sm" type="button" id="copyLinks" style="justify-self:start">Copier le lien</button></label>' +
         '</form>',
       footer: '<button class="btn btn--primary" type="submit" form="settingsForm">Enregistrer</button>',
       onMount: function (sheet) {
         $('#copyLinks', sheet).addEventListener('click', function () {
           var ta = $('#nfcLinks', sheet);
-          var ok = function () { UI.toast('Liens copiés'); };
+          var ok = function () { UI.toast('Lien copié'); };
           if (navigator.clipboard) navigator.clipboard.writeText(ta.value).then(ok, function () { ta.select(); });
           else { ta.select(); try { document.execCommand('copy'); ok(); } catch (e) { /* ignore */ } }
-        });
-        $('[name="tables"]', sheet).addEventListener('input', function (e) {
-          var n = Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 1));
-          $('#nfcLinks', sheet).value = nfcLinks(n);
         });
         $('#settingsForm', sheet).addEventListener('submit', function (e) {
           e.preventDefault();
