@@ -1,0 +1,759 @@
+/* ==========================================================================
+   Tapigo — Interface client (menu.html?table=X)
+   Menu interactif · fiche produit · panier · paiement · suivi temps réel
+   ========================================================================== */
+(function () {
+  'use strict';
+
+  var T = Tapigo, UI = TapigoUI, I = UI.ICONS, esc = T.esc, fmt = T.fmt;
+  var $ = function (s, root) { return (root || document).querySelector(s); };
+
+  /* ---------------- Table détectée depuis l'URL NFC ---------------- */
+  var params = new URLSearchParams(location.search);
+  var table = (params.get('table') || '').replace(/[^0-9A-Za-z-]/g, '').slice(0, 6) || null;
+  var scope = table || 'none';
+  var CART_KEY = 'tapigo.v1.cart.' + scope;
+  var NOTE_KEY = 'tapigo.v1.cartnote.' + scope;
+  var MINE_KEY = 'tapigo.v1.mine.' + scope;
+
+  var state = {
+    restaurant: T.getRestaurant(),
+    menu: T.getMenu(),
+    cat: 'all',
+    tags: [],
+    q: '',
+    cart: T.read(CART_KEY, []),
+    note: T.read(NOTE_KEY, ''),
+    mine: T.read(MINE_KEY, []),
+    trackingId: null,
+    payMethod: 'applepay'
+  };
+
+  function norm(s) {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+
+  /* ======================================================================
+     En-tête
+     ====================================================================== */
+  function renderHeader() {
+    var r = state.restaurant;
+    $('#rName').textContent = r.name;
+    $('#rTagline').textContent = r.tagline || '';
+    $('#rLogo').textContent = (r.logoLetter || r.name || 'T').trim().charAt(0).toUpperCase();
+    document.title = r.name + (table ? ' · Table ' + table : '') + ' · Menu';
+
+    var badge = $('#tableBadge');
+    badge.className = 'table-badge' + (table ? '' : ' table-badge--missing');
+    badge.innerHTML = '<small>Table</small><b>' + (table ? esc(table) : '—') + '</b>';
+
+    $('#welcome').innerHTML = I.nfc + (table
+      ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>. Composez votre commande : elle part directement en cuisine.</p>'
+      : '<p><strong>Table non détectée.</strong> Approchez votre téléphone du tag NFC de votre table, ou indiquez son numéro au moment de commander.</p>');
+  }
+
+  /* ======================================================================
+     Filtres & recherche
+     ====================================================================== */
+  function availableItems() {
+    return state.menu.items.filter(function (i) { return i.available !== false; });
+  }
+
+  function matches(item) {
+    for (var t = 0; t < state.tags.length; t++) {
+      if ((item.tags || []).indexOf(state.tags[t]) < 0) return false;
+    }
+    if (state.q) return norm(item.name + ' ' + item.description).indexOf(norm(state.q)) >= 0;
+    return true;
+  }
+
+  function renderChips() {
+    var items = availableItems();
+    var cats = [{ id: 'all', label: 'Tout' }].concat(state.menu.categories);
+    $('#catChips').innerHTML = cats.map(function (c) {
+      var n = c.id === 'all' ? items.length : items.filter(function (i) { return i.category === c.id; }).length;
+      if (c.id !== 'all' && !n) return '';
+      return '<button class="chip" type="button" data-cat="' + esc(c.id) + '" aria-pressed="' + (state.cat === c.id) + '">' + esc(c.label) + '</button>';
+    }).join('');
+
+    var tags = state.menu.tags || {};
+    $('#tagChips').innerHTML = Object.keys(tags).map(function (k) {
+      var on = state.tags.indexOf(k) >= 0;
+      return '<button class="chip chip--tag" type="button" data-tag="' + esc(k) + '" aria-pressed="' + on + '">' + tagIcon(k) + ' ' + esc(tags[k]) + '</button>';
+    }).join('');
+  }
+
+  function tagIcon(k) { return { veggie: '🌿', gf: '🌾', signature: '✦' }[k] || '•'; }
+
+  /* ======================================================================
+     Menu
+     ====================================================================== */
+  function qtyInCart(itemId) {
+    return state.cart.reduce(function (s, l) { return s + (l.itemId === itemId ? l.qty : 0); }, 0);
+  }
+
+  function dishHTML(item, idx) {
+    var tags = state.menu.tags || {};
+    var q = qtyInCart(item.id);
+    var signature = (item.tags || []).indexOf('signature') >= 0;
+    var tagText = (item.tags || []).filter(function (t) { return t !== 'signature'; })
+      .map(function (t) { return tagIcon(t) + ' ' + esc(tags[t] || t); }).join(' · ');
+    return '<article class="dish" tabindex="0" role="button" data-id="' + esc(item.id) + '" style="animation-delay:' + Math.min(idx * 35, 400) + 'ms" aria-label="' + esc(item.name) + ', ' + fmt(item.price) + '">' +
+      '<div class="dish__body">' +
+        '<div class="dish__title"><h3>' + esc(item.name) + '</h3>' + (signature ? '<span class="badge badge--gold">Signature</span>' : '') + '</div>' +
+        '<p class="dish__desc">' + esc(item.description) + '</p>' +
+        '<div class="dish__meta"><span class="price">' + fmt(item.price) + '</span>' +
+          (item.options && item.options.length ? '<span class="dish__tags">Personnalisable</span>' : '') +
+          (tagText ? '<span class="dish__tags">' + tagText + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="dish__media media" data-emoji="' + esc(item.emoji || '🍽️') + '">' +
+        (item.image ? '<img src="' + esc(item.image) + '" alt="" loading="lazy" decoding="async">' : '') +
+        (q ? '<span class="dish__qty">' + q + '</span>' : '') +
+        '<button class="dish__add" type="button" data-add="' + esc(item.id) + '" aria-label="Ajouter ' + esc(item.name) + '">' + I.plus + '</button>' +
+      '</div>' +
+    '</article>';
+  }
+
+  function renderMenu() {
+    var items = availableItems().filter(matches);
+    var cats = state.menu.categories.filter(function (c) { return state.cat === 'all' || c.id === state.cat; });
+    var idx = 0;
+    var html = cats.map(function (c) {
+      var list = items.filter(function (i) { return i.category === c.id; });
+      if (!list.length) return '';
+      return '<section class="c-section" id="cat-' + esc(c.id) + '">' +
+        '<div class="c-section__head"><h2>' + esc(c.label) + '</h2><span class="c-section__count">' + list.length + ' choix</span></div>' +
+        '<div class="dish-list">' + list.map(function (i) { return dishHTML(i, idx++); }).join('') + '</div>' +
+      '</section>';
+    }).join('');
+
+    $('#menu').innerHTML = html || '<div class="empty"><h3>Aucun résultat</h3><p>Essayez un autre mot-clé ou retirez un filtre.</p>' +
+      '<p style="margin-top:16px"><button class="btn btn--ghost btn--sm" type="button" id="resetFilters">Réinitialiser les filtres</button></p></div>';
+  }
+
+  /* ======================================================================
+     Fiche produit
+     ====================================================================== */
+  function readSelections(root, item) {
+    var sel = {};
+    (item.options || []).forEach(function (g) {
+      var picked = [].slice.call(root.querySelectorAll('[name="g_' + g.id + '"]:checked')).map(function (i) { return i.value; });
+      if (picked.length) sel[g.id] = picked;
+    });
+    return sel;
+  }
+
+  function openProduct(id) {
+    var item = T.getItem(id);
+    if (!item || item.available === false) return;
+    var qty = 1;
+    var tags = state.menu.tags || {};
+
+    var groups = (item.options || []).map(function (g) {
+      var multi = g.type === 'multi';
+      return '<fieldset class="opt-group' + (g.required ? ' is-required' : '') + '" data-group="' + esc(g.id) + '" data-type="' + (multi ? 'multi' : 'single') + '" data-required="' + !!g.required + '">' +
+        '<legend>' + esc(g.name) + '<small>' + (g.required ? 'Obligatoire' : multi ? 'Facultatif · plusieurs choix' : 'Facultatif') + '</small></legend>' +
+        g.choices.map(function (c) {
+          return '<label class="opt"><input type="' + (multi ? 'checkbox' : 'radio') + '" name="g_' + esc(g.id) + '" value="' + esc(c.label) + '">' +
+            '<span class="opt__mark' + (multi ? ' opt__mark--check' : '') + '"></span>' +
+            '<span class="opt__label">' + esc(c.label) + '</span>' +
+            (Number(c.price) ? '<span class="opt__price">+ ' + fmt(c.price) + '</span>' : '') +
+          '</label>';
+        }).join('') +
+      '</fieldset>';
+    }).join('');
+
+    UI.openSheet({
+      label: item.name,
+      media: UI.media(item, 'sheet__media'),
+      head:
+        '<div class="check-row" style="margin-bottom:10px">' + (item.tags || []).map(function (t) {
+          return '<span class="badge' + (t === 'signature' ? ' badge--gold' : '') + '">' + tagIcon(t) + ' ' + esc(tags[t] || t) + '</span>';
+        }).join('') + '</div>' +
+        '<h2>' + esc(item.name) + '</h2>',
+      body:
+        '<p class="product-desc">' + esc(item.description) + '</p>' +
+        (item.allergens ? '<p class="allergens">Allergènes : ' + esc(item.allergens) + '</p>' : '') +
+        groups +
+        '<label class="field"><span>Note pour la cuisine</span>' +
+          '<textarea id="pNote" maxlength="140" placeholder="Ex : sans oignon, sauce à part, allergie…"></textarea></label>',
+      footer:
+        '<div class="stepper" role="group" aria-label="Quantité">' +
+          '<button type="button" data-step="-1" aria-label="Retirer un">−</button><output id="pQty">1</output><button type="button" data-step="1" aria-label="Ajouter un">+</button>' +
+        '</div>' +
+        '<button class="btn btn--primary" type="button" id="pAdd"></button>',
+      onMount: function (sheet) {
+        var btn = $('#pAdd', sheet);
+        var update = function () {
+          var line = T.buildLine(item.id, qty, readSelections(sheet, item), '');
+          $('#pQty', sheet).textContent = qty;
+          btn.textContent = 'Ajouter · ' + fmt(line.unitPrice * qty);
+        };
+        update();
+
+        // Un choix unique facultatif peut être désélectionné d'un second tap.
+        var wasChecked = null;
+        sheet.addEventListener('pointerdown', function (e) {
+          var lab = e.target.closest('.opt-group[data-type="single"][data-required="false"] .opt');
+          wasChecked = lab ? lab.querySelector('input').checked : null;
+        });
+        sheet.addEventListener('click', function (e) {
+          var input = e.target.closest('.opt-group[data-type="single"][data-required="false"] input');
+          if (input && wasChecked) { input.checked = false; wasChecked = null; update(); }
+          var step = e.target.closest('[data-step]');
+          if (step) { qty = Math.min(20, Math.max(1, qty + Number(step.dataset.step))); update(); }
+        });
+        sheet.addEventListener('change', function (e) {
+          var g = e.target.closest('.opt-group');
+          if (g) g.classList.remove('is-invalid');
+          update();
+        });
+
+        btn.addEventListener('click', function () {
+          var sel = readSelections(sheet, item);
+          var missing = (item.options || []).filter(function (g) { return g.required && !sel[g.id]; });
+          if (missing.length) {
+            var el = sheet.querySelector('[data-group="' + missing[0].id + '"]');
+            missing.forEach(function (g) {
+              var f = sheet.querySelector('[data-group="' + g.id + '"]');
+              f.classList.remove('is-invalid'); void f.offsetWidth; f.classList.add('is-invalid');
+            });
+            // Défile dans la zone scrollable du sheet (scrollIntoView décalerait le sheet entier).
+            var scroller = sheet.querySelector('.sheet__scroll');
+            scroller.scrollTo({
+              top: scroller.scrollTop + el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24,
+              behavior: 'smooth'
+            });
+            UI.vibrate(40);
+            return;
+          }
+          addToCart(item.id, qty, sel, $('#pNote', sheet).value.trim());
+          UI.closeSheet();
+          UI.toast('<strong>' + qty + ' × ' + esc(item.name) + '</strong> ajouté au panier');
+        });
+      }
+    });
+  }
+
+  /* ======================================================================
+     Panier
+     ====================================================================== */
+  function lineKey(itemId, sel, note) {
+    var s = Object.keys(sel).sort().map(function (k) { return k + ':' + sel[k].slice().sort().join(','); }).join('|');
+    return itemId + '#' + s + '#' + note;
+  }
+
+  function saveCart() {
+    T.write(CART_KEY, state.cart);
+    T.write(NOTE_KEY, state.note);
+  }
+
+  function addToCart(itemId, qty, sel, note) {
+    var key = lineKey(itemId, sel, note);
+    var existing = state.cart.filter(function (l) { return l.key === key; })[0];
+    if (existing) existing.qty = Math.min(50, existing.qty + qty);
+    else state.cart.push({ key: key, itemId: itemId, qty: qty, selections: sel, note: note });
+    saveCart();
+    renderCartBar(true);
+    renderMenu();
+    UI.vibrate(15);
+  }
+
+  /* Prix toujours recalculés depuis le menu courant (le restaurateur peut changer un prix). */
+  function cartLines() {
+    return state.cart.map(function (l) {
+      var item = T.getItem(l.itemId);
+      var built = item ? T.buildLine(l.itemId, l.qty, l.selections, l.note) : null;
+      return { raw: l, item: item, built: built, unavailable: !item || item.available === false };
+    });
+  }
+
+  function cartSummary() {
+    var lines = cartLines().filter(function (l) { return !l.unavailable; });
+    return {
+      count: lines.reduce(function (s, l) { return s + l.raw.qty; }, 0),
+      total: lines.reduce(function (s, l) { return s + l.built.unitPrice * l.raw.qty; }, 0),
+      lines: lines
+    };
+  }
+
+  function renderCartBar(bump) {
+    var s = cartSummary();
+    var bar = $('#cartBar');
+    bar.hidden = !state.cart.length || !!state.trackingId;
+    $('#cartCount').textContent = s.count;
+    $('#cartTotal').textContent = fmt(s.total);
+    if (bump) { bar.classList.remove('bump'); void bar.offsetWidth; bar.classList.add('bump'); }
+  }
+
+  function optText(built) {
+    return built.options.map(function (o) { return o.values.join(', '); }).join(' · ');
+  }
+
+  function cartBodyHTML() {
+    var lines = cartLines();
+    if (!lines.length) {
+      return '<div class="empty"><h3>Votre panier est vide</h3><p>Parcourez la carte et laissez-vous tenter.</p></div>';
+    }
+    var s = cartSummary();
+    return '<div>' + lines.map(function (l, i) {
+      var r = l.raw;
+      if (l.unavailable) {
+        return '<div class="cart-line"><div><h4>' + esc(l.item ? l.item.name : 'Produit retiré') + '</h4>' +
+          '<p class="cart-line__opts"><span class="badge badge--danger">Plus disponible</span></p></div>' +
+          '<div class="cart-line__actions"><button class="link-btn link-btn--danger" type="button" data-remove="' + i + '">Retirer</button></div></div>';
+      }
+      return '<div class="cart-line">' +
+        '<div><h4>' + esc(l.item.name) + '</h4>' +
+          (l.built.options.length ? '<p class="cart-line__opts">' + esc(optText(l.built)) + '</p>' : '') +
+          (r.note ? '<p class="cart-line__note">« ' + esc(r.note) + ' »</p>' : '') +
+        '</div>' +
+        '<div class="cart-line__price">' + fmt(l.built.unitPrice * r.qty) + '</div>' +
+        '<div class="cart-line__actions">' +
+          '<div class="stepper stepper--sm" role="group" aria-label="Quantité">' +
+            '<button type="button" data-qty="' + i + '" data-d="-1" aria-label="Retirer un">−</button><output>' + r.qty + '</output>' +
+            '<button type="button" data-qty="' + i + '" data-d="1" aria-label="Ajouter un">+</button></div>' +
+          '<button class="link-btn" type="button" data-note="' + i + '">' + (r.note ? 'Modifier la note' : 'Ajouter une note') + '</button>' +
+          '<button class="link-btn link-btn--danger" type="button" data-remove="' + i + '" style="margin-left:auto">Retirer</button>' +
+        '</div>' +
+        '<div class="line-note-input" data-note-box="' + i + '" hidden><input class="input" maxlength="140" placeholder="Ex : sans oignon" value="' + esc(r.note) + '"></div>' +
+      '</div>';
+    }).join('') + '</div>' +
+    '<label class="field"><span>Un message pour toute la commande ?</span>' +
+      '<textarea id="cartNote" maxlength="200" placeholder="Ex : servir les entrées ensemble, une chaise bébé…">' + esc(state.note) + '</textarea></label>' +
+    '<div class="totals">' +
+      '<div class="totals__row"><span>' + s.count + ' article' + (s.count > 1 ? 's' : '') + '</span><span>' + fmt(s.total) + '</span></div>' +
+      '<div class="totals__row"><span>Service</span><span>Inclus</span></div>' +
+      '<div class="totals__row totals__row--grand"><span>Total TTC</span><span>' + fmt(s.total) + '</span></div>' +
+    '</div>';
+  }
+
+  function openCart() {
+    UI.openSheet({
+      label: 'Panier',
+      head: '<p class="eyebrow">' + (table ? 'Table ' + esc(table) : 'Votre commande') + '</p><h2>Votre panier</h2>',
+      body: '<div id="cartBody"></div>',
+      footer: '<button class="btn btn--primary" type="button" id="toCheckout"></button>',
+      onMount: function (sheet) {
+        var body = $('#cartBody', sheet);
+        var btn = $('#toCheckout', sheet);
+        var paint = function () {
+          body.innerHTML = cartBodyHTML();
+          var s = cartSummary();
+          btn.disabled = !s.count;
+          btn.textContent = s.count ? 'Commander · ' + fmt(s.total) : 'Panier vide';
+          renderCartBar();
+        };
+        paint();
+        body.addEventListener('click', function (e) {
+          var t = e.target.closest('button');
+          if (!t) return;
+          if (t.dataset.qty != null) {
+            var l = state.cart[+t.dataset.qty];
+            l.qty += Number(t.dataset.d);
+            if (l.qty <= 0) state.cart.splice(+t.dataset.qty, 1);
+            saveCart(); paint(); renderMenu();
+          } else if (t.dataset.remove != null) {
+            state.cart.splice(+t.dataset.remove, 1);
+            saveCart(); paint(); renderMenu();
+          } else if (t.dataset.note != null) {
+            var box = body.querySelector('[data-note-box="' + t.dataset.note + '"]');
+            box.hidden = !box.hidden;
+            if (!box.hidden) box.querySelector('input').focus();
+          }
+        });
+        body.addEventListener('change', function (e) {
+          if (e.target.id === 'cartNote') { state.note = e.target.value.trim(); saveCart(); return; }
+          var box = e.target.closest('[data-note-box]');
+          if (box) {
+            var line = state.cart[+box.dataset.noteBox];
+            line.note = e.target.value.trim();
+            // Fusionne avec une ligne identique éventuelle.
+            line.key = lineKey(line.itemId, line.selections, line.note);
+            var dup = state.cart.filter(function (x) { return x !== line && x.key === line.key; })[0];
+            if (dup) { dup.qty += line.qty; state.cart.splice(state.cart.indexOf(line), 1); }
+            saveCart(); paint();
+          }
+        });
+        btn.addEventListener('click', function () {
+          var note = $('#cartNote', sheet);
+          if (note) { state.note = note.value.trim(); saveCart(); }
+          openCheckout();
+        });
+      }
+    });
+  }
+
+  /* ======================================================================
+     Paiement
+     ====================================================================== */
+  function payMethodHTML(id, icon, title, sub) {
+    return '<label class="pay-method"><input type="radio" name="pay" value="' + id + '"' + (state.payMethod === id ? ' checked' : '') + '>' +
+      '<span class="pay-method__icon' + (id === 'applepay' ? ' pay-method__icon--apple' : '') + '">' + icon + '</span>' +
+      '<span class="pay-method__text"><strong>' + title + '</strong><span>' + sub + '</span></span>' +
+      '<span class="opt__mark"></span></label>';
+  }
+
+  function openCheckout() {
+    var s = cartSummary();
+    if (!s.count) return;
+    var walletLabel = /android/i.test(navigator.userAgent) ? 'Google Pay' : 'Apple Pay';
+
+    UI.openSheet({
+      label: 'Paiement',
+      head: '<p class="eyebrow">Étape finale</p><h2>Payer &amp; commander</h2>',
+      body:
+        (table
+          ? '<div class="totals"><div class="totals__row"><span>Table</span><strong style="color:var(--ink)">' + esc(table) + '</strong></div>' +
+            '<div class="totals__row"><span>' + s.count + ' article' + (s.count > 1 ? 's' : '') + '</span><strong style="color:var(--ink)">' + fmt(s.total) + '</strong></div></div>'
+          : '<label class="field"><span>Numéro de votre table</span><input id="tableInput" inputmode="numeric" maxlength="4" placeholder="Ex : 12" autofocus>' +
+            '<small class="help">Indiqué sur le chevalet NFC posé sur votre table.</small></label>') +
+        '<div class="pay-methods" role="radiogroup" aria-label="Moyen de paiement">' +
+          payMethodHTML('applepay', I.apple, walletLabel, 'Paiement express en un geste') +
+          payMethodHTML('card', I.card, 'Carte bancaire', 'Visa, Mastercard, Amex · via Stripe') +
+          payMethodHTML('onsite', I.wallet, 'Payer sur place', 'Le serveur passe avec le terminal en fin de repas') +
+        '</div>' +
+        '<div id="cardForm"></div>' +
+        '<p class="secure">' + I.lock + ' Paiement sécurisé par Stripe · Données chiffrées</p>',
+      footer: '<button class="btn btn--primary" type="button" id="payBtn"></button>',
+      onMount: function (sheet) {
+        var btn = $('#payBtn', sheet);
+        var paint = function () {
+          var m = state.payMethod;
+          $('#cardForm', sheet).innerHTML = m === 'card'
+            ? '<div class="card-form">' +
+                '<label class="field"><span>Numéro de carte</span><input id="ccNum" inputmode="numeric" autocomplete="cc-number" placeholder="4242 4242 4242 4242" maxlength="19"></label>' +
+                '<label class="field"><span>Expiration</span><input id="ccExp" inputmode="numeric" autocomplete="cc-exp" placeholder="MM/AA" maxlength="5"></label>' +
+                '<label class="field"><span>CVC</span><input id="ccCvc" inputmode="numeric" autocomplete="cc-csc" placeholder="123" maxlength="4"></label>' +
+                '<p class="help">Mode démo : utilisez 4242 4242 4242 4242, n’importe quelle date future et un CVC.</p>' +
+              '</div>'
+            : '';
+          btn.innerHTML = m === 'onsite'
+            ? 'Commander · ' + fmt(s.total)
+            : m === 'applepay' ? I.apple.replace('<svg ', '<svg width="18" height="18" ') + ' Payer et commander · ' + fmt(s.total)
+            : 'Payer et commander · ' + fmt(s.total);
+        };
+        paint();
+
+        sheet.addEventListener('change', function (e) {
+          if (e.target.name === 'pay') { state.payMethod = e.target.value; paint(); }
+        });
+        sheet.addEventListener('input', function (e) {
+          var t = e.target;
+          if (t.id === 'ccNum') t.value = t.value.replace(/\D/g, '').slice(0, 16).replace(/(\d{4})(?=\d)/g, '$1 ');
+          if (t.id === 'ccExp') t.value = t.value.replace(/\D/g, '').slice(0, 4).replace(/^(\d{2})(\d)/, '$1/$2');
+          if (t.id === 'ccCvc') t.value = t.value.replace(/\D/g, '').slice(0, 4);
+          if (t.id === 'tableInput') t.value = t.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 4);
+          t.style.borderColor = '';
+        });
+
+        btn.addEventListener('click', function () {
+          var tableNo = table || ($('#tableInput', sheet) && $('#tableInput', sheet).value.trim());
+          if (!tableNo) return invalid($('#tableInput', sheet), 'Indiquez votre numéro de table');
+          if (state.payMethod === 'card') {
+            var num = $('#ccNum', sheet), exp = $('#ccExp', sheet), cvc = $('#ccCvc', sheet);
+            if (!luhn(num.value.replace(/\s/g, ''))) return invalid(num, 'Numéro de carte invalide');
+            if (!validExpiry(exp.value)) return invalid(exp, 'Date d’expiration invalide');
+            if (cvc.value.length < 3) return invalid(cvc, 'CVC invalide');
+          }
+          submit(btn, tableNo);
+        });
+      }
+    });
+  }
+
+  function invalid(input, msg) {
+    if (input) { input.style.borderColor = 'var(--danger)'; input.focus(); }
+    UI.toast(msg);
+    UI.vibrate(40);
+  }
+
+  function luhn(n) {
+    if (!/^\d{13,19}$/.test(n)) return false;
+    var sum = 0, alt = false;
+    for (var i = n.length - 1; i >= 0; i--) {
+      var d = +n[i];
+      if (alt) { d *= 2; if (d > 9) d -= 9; }
+      sum += d; alt = !alt;
+    }
+    return sum % 10 === 0;
+  }
+
+  function validExpiry(v) {
+    var m = /^(\d{2})\/(\d{2})$/.exec(v);
+    if (!m || +m[1] < 1 || +m[1] > 12) return false;
+    return new Date(2000 + +m[2], +m[1], 0, 23, 59) >= new Date();
+  }
+
+  /*
+   * PRODUCTION — intégration Stripe :
+   *  1. POST /api/payments/intent { restaurantId, table, lines } -> { clientSecret }
+   *     (le serveur recalcule le montant depuis la base : ne jamais faire confiance au client)
+   *  2. Carte : stripe.confirmCardPayment(clientSecret, { payment_method: { card: cardElement } })
+   *     Apple Pay / Google Pay : stripe.paymentRequest({ country: 'FR', currency: 'eur', total })
+   *       -> canMakePayment() puis paymentRequest.on('paymentmethod', ...)
+   *  3. Le webhook "payment_intent.succeeded" crée la commande et notifie la cuisine.
+   *  « Payer sur place » crée directement la commande avec payment.status = 'pending'.
+   */
+  function simulatePayment(method) {
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        resolve({
+          method: method,
+          status: method === 'onsite' ? 'pending' : 'paid',
+          ref: method === 'onsite' ? null : 'pi_demo_' + Math.random().toString(36).slice(2, 10)
+        });
+      }, method === 'onsite' ? 600 : 1500);
+    });
+  }
+
+  function submit(btn, tableNo) {
+    var s = cartSummary();
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> ' + (state.payMethod === 'onsite' ? 'Envoi en cuisine…' : 'Paiement sécurisé en cours…');
+
+    simulatePayment(state.payMethod).then(function (payment) {
+      var order = T.createOrder({
+        table: tableNo,
+        note: state.note,
+        payment: payment,
+        lines: s.lines.map(function (l) { return l.built; })
+      });
+      if (!table) {
+        // Mémorise la table saisie pour la suite de la session.
+        table = tableNo; scope = tableNo;
+        CART_KEY = 'tapigo.v1.cart.' + scope; NOTE_KEY = 'tapigo.v1.cartnote.' + scope; MINE_KEY = 'tapigo.v1.mine.' + scope;
+        state.mine = T.read(MINE_KEY, []);
+        try { history.replaceState(null, '', '?table=' + encodeURIComponent(tableNo)); } catch (e) { /* ignore */ }
+        renderHeader();
+      }
+      state.mine.push(order.id);
+      T.write(MINE_KEY, state.mine);
+      state.cart = []; state.note = '';
+      saveCart();
+      UI.vibrate([20, 40, 20]);
+      UI.closeSheet().then(function () { showTracking(order.id); });
+      renderMenu();
+    });
+  }
+
+  /* ======================================================================
+     Suivi de commande en temps réel
+     ====================================================================== */
+  var CLIENT_STEPS = [
+    { id: 'nouvelle', label: 'Commande envoyée en cuisine' },
+    { id: 'preparation', label: 'En préparation' },
+    { id: 'prete', label: 'Prête' },
+    { id: 'servie', label: 'Servie' }
+  ];
+  var PAY_LABEL = { applepay: 'Apple Pay', card: 'Carte bancaire', onsite: 'Sur place' };
+
+  function stepTime(order, id) {
+    var h = (order.history || []).filter(function (x) { return x.status === id; })[0];
+    return h ? T.clock(h.at) : '';
+  }
+
+  function trackHTML(order) {
+    var idx = order.status === 'terminee' ? CLIENT_STEPS.length : CLIENT_STEPS.map(function (s) { return s.id; }).indexOf(order.status);
+    var info = T.statusInfo(order.status);
+    var icon = order.status === 'preparation' ? '<div class="track__icon is-cooking">' + I.chef + '</div>'
+      : order.status === 'prete' ? '<div class="track__icon is-cooking">' + I.tray + '</div>'
+      : '<div class="track__icon">' + I.check + '</div>';
+    var paid = order.payment.status === 'paid';
+
+    return '<div class="track__inner">' +
+      '<div class="track__top">' +
+        '<button class="icon-btn" type="button" data-close-track aria-label="Retour au menu">' + I.back + '</button>' +
+        '<span class="badge badge--dark">Table ' + esc(order.table) + '</span>' +
+      '</div>' +
+      '<div class="track__hero">' + icon +
+        '<p class="eyebrow">Commande n° ' + order.number + ' · ' + T.clock(order.createdAt) + '</p>' +
+        '<h2>' + esc(info.client) + '</h2><p>' + esc(info.hint) + '</p>' +
+      '</div>' +
+      '<ol class="steps">' + CLIENT_STEPS.map(function (s, i) {
+        // Étapes atteintes cochées, l'étape suivante « respire ».
+        var cls = i <= idx ? 'is-done' : i === idx + 1 ? 'is-current' : '';
+        return '<li class="step ' + cls + '"><span class="step__dot">' + I.check + '</span>' +
+          '<span class="step__label">' + s.label + '</span><span class="step__time">' + stepTime(order, s.id) + '</span></li>';
+      }).join('') + '</ol>' +
+      '<div class="recap">' + order.lines.map(function (l) {
+        return '<div class="cart-line"><span class="qty">' + l.qty + '×</span><div><h4>' + esc(l.name) + '</h4>' +
+          (l.options.length ? '<p class="cart-line__opts">' + esc(optText(l)) + '</p>' : '') +
+          (l.note ? '<p class="cart-line__note">« ' + esc(l.note) + ' »</p>' : '') +
+          '</div><div class="cart-line__price">' + fmt(l.unitPrice * l.qty) + '</div></div>';
+      }).join('') +
+        (order.note ? '<div class="cart-line"><span></span><p class="cart-line__note">Note : « ' + esc(order.note) + ' »</p><span></span></div>' : '') +
+      '</div>' +
+      '<div class="totals">' +
+        '<div class="totals__row"><span>Paiement</span><span class="badge ' + (paid ? 'badge--ok' : 'badge--warn') + '">' +
+          (paid ? 'Payé · ' + PAY_LABEL[order.payment.method] : 'À régler sur place') + '</span></div>' +
+        '<div class="totals__row totals__row--grand"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
+      '</div>' +
+      '<button class="btn btn--primary btn--block" type="button" data-close-track>Revenir au menu</button>' +
+      '<p class="secure">Cette page se met à jour automatiquement.</p>' +
+    '</div>';
+  }
+
+  function showTracking(id) {
+    var order = T.getOrder(id);
+    if (!order) return;
+    state.trackingId = id;
+    var root = $('#trackRoot');
+    root.innerHTML = '<section class="track" role="dialog" aria-modal="true" aria-label="Suivi de commande">' + trackHTML(order) + '</section>';
+    document.body.style.overflow = 'hidden';
+    renderCartBar();
+    renderTrackPill();
+  }
+
+  function hideTracking() {
+    state.trackingId = null;
+    $('#trackRoot').innerHTML = '';
+    document.body.style.overflow = '';
+    renderCartBar();
+    renderTrackPill();
+  }
+
+  function activeOrders() {
+    return state.mine.map(T.getOrder).filter(function (o) { return o && o.status !== 'terminee'; });
+  }
+
+  function renderTrackPill() {
+    var list = activeOrders();
+    var pill = $('#trackPill');
+    pill.hidden = !list.length || !!state.trackingId;
+    if (!list.length) return;
+    $('#trackPillLabel').textContent = list.length > 1
+      ? list.length + ' commandes en cours'
+      : 'N° ' + list[0].number + ' · ' + T.statusInfo(list[0].status).label;
+  }
+
+  function openOrdersList() {
+    var list = activeOrders();
+    if (list.length === 1) return showTracking(list[0].id);
+    UI.openSheet({
+      label: 'Mes commandes',
+      head: '<p class="eyebrow">Table ' + esc(table) + '</p><h2>Mes commandes</h2>',
+      body: '<div class="order-list">' + list.slice().reverse().map(function (o) {
+        return '<button class="order-link" type="button" data-track="' + esc(o.id) + '"><span><strong>Commande n° ' + o.number + '</strong><br>' +
+          '<small style="color:var(--muted)">' + T.clock(o.createdAt) + ' · ' + fmt(o.total) + '</small></span>' +
+          '<span class="badge badge--dark">' + esc(T.statusInfo(o.status).label) + '</span></button>';
+      }).join('') + '</div>',
+      onMount: function (sheet) {
+        sheet.addEventListener('click', function (e) {
+          var b = e.target.closest('[data-track]');
+          if (b) UI.closeSheet().then(function () { showTracking(b.dataset.track); });
+        });
+      }
+    });
+  }
+
+  /* ======================================================================
+     Événements
+     ====================================================================== */
+  function bind() {
+    $('#searchIcon').outerHTML = I.search;
+
+    var search = $('#search'), clear = $('#searchClear'), timer;
+    search.addEventListener('input', function () {
+      clearTimeout(timer);
+      clear.hidden = !search.value;
+      timer = setTimeout(function () { state.q = search.value.trim(); renderMenu(); }, 120);
+    });
+    clear.addEventListener('click', function () {
+      search.value = ''; state.q = ''; clear.hidden = true; renderMenu(); search.focus();
+    });
+
+    $('#catChips').addEventListener('click', function (e) {
+      var c = e.target.closest('[data-cat]');
+      if (!c) return;
+      state.cat = c.dataset.cat;
+      renderChips(); renderMenu();
+      c.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+      var top = $('#toolbar').offsetTop;
+      if (window.scrollY > top) window.scrollTo({ top: top, behavior: 'smooth' });
+    });
+
+    $('#tagChips').addEventListener('click', function (e) {
+      var c = e.target.closest('[data-tag]');
+      if (!c) return;
+      var k = c.dataset.tag, i = state.tags.indexOf(k);
+      if (i >= 0) state.tags.splice(i, 1); else state.tags.push(k);
+      renderChips(); renderMenu();
+    });
+
+    $('#menu').addEventListener('click', function (e) {
+      if (e.target.closest('#resetFilters')) {
+        state.cat = 'all'; state.tags = []; state.q = ''; search.value = ''; clear.hidden = true;
+        renderChips(); renderMenu();
+        return;
+      }
+      var add = e.target.closest('[data-add]');
+      if (add) {
+        e.stopPropagation();
+        var item = T.getItem(add.dataset.add);
+        // Ajout express si le plat n'a aucune option obligatoire.
+        if (item && !(item.options || []).some(function (g) { return g.required; })) {
+          addToCart(item.id, 1, {}, '');
+          UI.toast('<strong>' + esc(item.name) + '</strong> ajouté au panier', 1800);
+          return;
+        }
+        return openProduct(add.dataset.add);
+      }
+      var dish = e.target.closest('.dish');
+      if (dish) openProduct(dish.dataset.id);
+    });
+    $('#menu').addEventListener('keydown', function (e) {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('dish')) {
+        e.preventDefault(); openProduct(e.target.dataset.id);
+      }
+    });
+
+    $('#cartBar').addEventListener('click', openCart);
+    $('#trackPill').addEventListener('click', openOrdersList);
+    $('#trackRoot').addEventListener('click', function (e) {
+      if (e.target.closest('[data-close-track]')) hideTracking();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && state.trackingId) hideTracking();
+    });
+
+    var toolbar = $('#toolbar');
+    var onScroll = function () { toolbar.classList.toggle('is-stuck', toolbar.getBoundingClientRect().top <= 0.5); };
+    window.addEventListener('scroll', onScroll, { passive: true });
+
+    /* Temps réel : statuts envoyés par la cuisine, menu modifié par le restaurateur. */
+    T.subscribe(function (msg) {
+      if (msg.type === 'order:updated' && msg.payload && state.mine.indexOf(msg.payload.id) >= 0) {
+        var o = msg.payload;
+        if (state.trackingId === o.id) {
+          $('#trackRoot .track').innerHTML = trackHTML(o);
+        } else {
+          UI.toast('<strong>Commande n° ' + o.number + '</strong> · ' + esc(T.statusInfo(o.status).client), 4000);
+        }
+        if (o.status === 'prete' || o.status === 'servie') UI.vibrate([60, 60, 60]);
+        renderTrackPill();
+      }
+      if (msg.type === 'orders:sync' && state.trackingId) {
+        var cur = T.getOrder(state.trackingId);
+        if (cur) $('#trackRoot .track').innerHTML = trackHTML(cur);
+        renderTrackPill();
+      }
+      if (msg.type === 'menu:updated' || msg.type === 'demo:reset') {
+        state.menu = T.getMenu();
+        renderChips(); renderMenu(); renderCartBar();
+      }
+      if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') {
+        state.restaurant = T.getRestaurant();
+        renderHeader();
+      }
+    });
+  }
+
+  renderHeader();
+  renderChips();
+  renderMenu();
+  renderCartBar();
+  renderTrackPill();
+  bind();
+})();
