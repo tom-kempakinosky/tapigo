@@ -6,6 +6,7 @@
   'use strict';
 
   var T = Tapigo, UI = TapigoUI, I = UI.ICONS, esc = T.esc, fmt = T.fmt;
+  var LIVE = T.mode === 'live';
   var $ = function (s, root) { return (root || document).querySelector(s); };
 
   var SOUND_KEY = 'tapigo.v1.kitchen.sound';
@@ -243,7 +244,7 @@
           '</div>';
         }).join('') + '</div></section>';
       }).join('') +
-      '<div style="text-align:center;padding-top:12px"><button class="btn btn--danger btn--sm" type="button" data-reset>' + I.reset.replace('<svg ', '<svg width="14" height="14" ') + ' Réinitialiser les données de démo</button></div>' +
+      (LIVE ? '' : '<div style="text-align:center;padding-top:12px"><button class="btn btn--danger btn--sm" type="button" data-reset>' + I.reset.replace('<svg ', '<svg width="14" height="14" ') + ' Réinitialiser les données de démo</button></div>') +
     '</div>';
 
     var view = $('#menuView');
@@ -368,6 +369,13 @@
     });
   }
 
+  function nfcLinks(n) {
+    var base = location.href.replace(/kitchen\.html.*$/, 'menu.html');
+    var out = [];
+    for (var i = 1; i <= n; i++) out.push('Table ' + i + ' : ' + base + '?table=' + i);
+    return out.join('\n');
+  }
+
   function openSettings() {
     var r = T.getRestaurant();
     UI.openSheet({
@@ -379,10 +387,22 @@
           '<label class="field span-2"><span>Accroche</span><input name="tagline" maxlength="80" value="' + esc(r.tagline || '') + '"></label>' +
           '<label class="field"><span>Nombre de tables</span><input name="tables" inputmode="numeric" value="' + (r.tables || 12) + '"></label>' +
           '<label class="field"><span>Lettre du logo</span><input name="logoLetter" maxlength="1" value="' + esc(r.logoLetter || r.name.charAt(0)) + '"></label>' +
-          '<p class="help span-2">Lien NFC à programmer sur chaque table : <code>' + esc(location.href.replace(/kitchen\.html.*$/, 'menu.html')) + '?table=N</code></p>' +
+          '<label class="field span-2"><span>Liens à programmer sur les plaques NFC (une par table)</span>' +
+            '<textarea id="nfcLinks" readonly rows="6" style="font-size:12px;font-family:ui-monospace,Menlo,monospace">' + esc(nfcLinks(r.tables || 12)) + '</textarea>' +
+            '<button class="btn btn--soft btn--sm" type="button" id="copyLinks" style="justify-self:start">Copier les liens</button></label>' +
         '</form>',
       footer: '<button class="btn btn--primary" type="submit" form="settingsForm">Enregistrer</button>',
       onMount: function (sheet) {
+        $('#copyLinks', sheet).addEventListener('click', function () {
+          var ta = $('#nfcLinks', sheet);
+          var ok = function () { UI.toast('Liens copiés'); };
+          if (navigator.clipboard) navigator.clipboard.writeText(ta.value).then(ok, function () { ta.select(); });
+          else { ta.select(); try { document.execCommand('copy'); ok(); } catch (e) { /* ignore */ } }
+        });
+        $('[name="tables"]', sheet).addEventListener('input', function (e) {
+          var n = Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 1));
+          $('#nfcLinks', sheet).value = nfcLinks(n);
+        });
         $('#settingsForm', sheet).addEventListener('submit', function (e) {
           e.preventDefault();
           var f = e.target.elements;
@@ -519,14 +539,79 @@
       if (/^order:|^orders:/.test(msg.type)) updateBadges();
       if ((msg.type === 'menu:updated' || msg.type === 'demo:reset') && state.view === 'menu') renderMenuEditor();
       if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') renderBrand();
+      if (msg.type === 'error') UI.toast('⚠ ' + esc(msg.payload.message), 5000);
     });
 
     setInterval(tickTimers, 15000);
   }
 
-  renderBrand();
-  renderSound();
-  bind();
-  setView('orders');
-  tickTimers();
+  /* ======================================================================
+     Démarrage & connexion (mode en ligne)
+     ====================================================================== */
+  function start() {
+    $('#simulateBtn').hidden = LIVE;
+    $('#logoutBtn').hidden = !LIVE;
+    renderBrand();
+    renderSound();
+    bind();
+    setView('orders');
+    tickTimers();
+  }
+
+  function showLogin(message) {
+    var el = $('#login');
+    el.hidden = false;
+    var err = $('#loginError');
+    err.hidden = !message;
+    err.textContent = message || '';
+    var btn = $('#loginBtn');
+    btn.disabled = false;
+    btn.textContent = 'Se connecter';
+  }
+
+  function enter() {
+    return T.startStaff().then(function () {
+      $('#login').hidden = true;
+      $('.kds').hidden = false;
+      start();
+    });
+  }
+
+  function checkAccess() {
+    return T.auth.isStaff().then(function (ok) {
+      if (ok) return enter();
+      return T.auth.signOut().then(function () {
+        showLogin('Ce compte n’a pas accès au tableau de bord. Ajoutez-le à l’équipe (table « staff » dans Supabase).');
+      });
+    });
+  }
+
+  function boot() {
+    if (!LIVE) { $('#login').hidden = true; $('.kds').hidden = false; return start(); }
+
+    $('#loginForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var f = e.target.elements;
+      var btn = $('#loginBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Connexion…';
+      T.auth.signIn(f.email.value.trim(), f.password.value)
+        .then(checkAccess)
+        .catch(function (err) { showLogin(err.message); });
+    });
+    $('#logoutBtn').addEventListener('click', function () {
+      T.auth.signOut().then(function () { location.reload(); });
+    });
+
+    return T.auth.session().then(function (session) {
+      if (session) return checkAccess();
+      showLogin();
+    });
+  }
+
+  T.ready.then(boot).catch(function (err) {
+    $('#login').hidden = false;
+    $('#loginForm').innerHTML = '<div class="logo" aria-hidden="true">T</div><h1>Connexion impossible</h1><p class="login__error">' + esc(err.message) + '</p>' +
+      '<button class="btn btn--primary btn--block" type="button" onclick="location.reload()">Réessayer</button>';
+  });
 })();

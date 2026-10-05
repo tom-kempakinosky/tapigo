@@ -545,6 +545,14 @@ img { display: block; max-width: 100%; }
 .k-history th, .k-history td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .k-history th { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 
+/* Connexion restaurateur */
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+.login__card { width: min(400px, 100%); display: grid; gap: 16px; padding: 32px 24px; border-radius: var(--r-lg); background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow-1); text-align: center; }
+.login__card .logo { justify-self: center; width: 56px; height: 56px; font-size: 30px; }
+.login__card h1 { font-size: 34px; }
+.login__card .field { text-align: left; }
+.login__error { padding: 10px 12px; border-radius: var(--r-sm); background: var(--danger-soft); color: var(--danger); font-size: 13px; font-weight: 600; text-align: left; }
+
 /* Éditeur de menu */
 .editor { max-width: 980px; margin: 0 auto; display: grid; gap: 22px; }
 .editor__bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

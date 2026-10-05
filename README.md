@@ -18,6 +18,26 @@ Ouvrez un **menu de table** et le **dashboard cuisine** dans deux onglets du mê
 | `menu.html?table=12` | Interface client ouverte par le tag NFC |
 | `kitchen.html` | Dashboard restaurateur (cuisine / bar et édition du menu) |
 
+## Passer en mode en ligne (vrais clients)
+
+Sans configuration, le site tourne en **mode démo** (données dans le navigateur uniquement).
+Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) (offre gratuite) :
+
+- Les clients commandent depuis leur téléphone via la plaque NFC (`menu.html?table=N`), et le paiement se fait à table.
+- Le **dashboard** (`kitchen.html`) est **protégé par e-mail et mot de passe** et reçoit les commandes en temps réel.
+- Les **prix sont recalculés par la base de données**, donc un client ne peut pas modifier le montant de sa commande.
+- Les clients ne peuvent lire ni les commandes des autres, ni modifier la carte.
+
+Mise en place :
+1. Créez un projet Supabase.
+2. Dans **SQL Editor**, collez et exécutez `supabase/schema.sql`.
+3. Dans **Authentication → Users → Add user**, créez votre compte (e-mail et mot de passe, avec « Auto Confirm User »).
+4. Dans **SQL Editor**, exécutez `insert into public.staff (user_id) select id from auth.users where email = 'vous@exemple.fr';`
+5. Dans **Authentication → Sign In / Providers**, désactivez « Allow new users to sign up ».
+6. Dans `js/config.js`, renseignez l'URL du projet et la clé `anon` / `publishable` (**jamais** la clé `service_role`).
+
+À la première connexion au dashboard, la carte de démonstration est copiée dans la base. Modifiez-la ensuite depuis l'onglet **Menu**. Les liens à programmer sur chaque plaque NFC se trouvent dans **Menu → Établissement**.
+
 ## Fonctionnalités
 
 **Client** (`menu.html?table=X`)
@@ -43,10 +63,13 @@ Ouvrez un **menu de table** et le **dashboard cuisine** dans deux onglets du mê
 ├── index.html          Accueil démo / simulateur NFC
 ├── menu.html           Interface client
 ├── kitchen.html        Dashboard cuisine & bar
+├── supabase/schema.sql  Base de données, droits et fonctions (mode en ligne)
 ├── css/tapigo.css      Charte « Chic & Élégant » (tokens, composants, responsive)
 └── js/
     ├── data.js         Données de démonstration (restaurant, catégories, plats, options)
-    ├── store.js        Backend simulé : persistance et temps réel (point d’intégration API)
+    ├── config.js       URL et clé Supabase (vide = mode démo)
+    ├── store.js        Backend simulé : persistance et temps réel (mode démo)
+    ├── store-remote.js Connecteur Supabase (mode en ligne)
     ├── ui.js           Bottom sheets, toasts, icônes, son, repli d’image
     ├── menu.js         Logique client
     └── kitchen.js      Logique restaurateur

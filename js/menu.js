@@ -6,6 +6,7 @@
   'use strict';
 
   var T = Tapigo, UI = TapigoUI, I = UI.ICONS, esc = T.esc, fmt = T.fmt;
+  var LIVE = T.mode === 'live';
   var $ = function (s, root) { return (root || document).querySelector(s); };
 
   /* ---------------- Table détectée depuis l'URL NFC ---------------- */
@@ -26,7 +27,7 @@
     note: T.read(NOTE_KEY, ''),
     mine: T.read(MINE_KEY, []),
     trackingId: null,
-    payMethod: 'applepay'
+    payMethod: LIVE ? 'onsite' : 'applepay'
   };
 
   function norm(s) {
@@ -128,6 +129,10 @@
       '</section>';
     }).join('');
 
+    if (!state.menu.items.length) {
+      $('#menu').innerHTML = '<div class="empty"><h3>La carte arrive bientôt</h3><p>Le restaurant prépare son menu. Revenez dans quelques instants.</p></div>';
+      return;
+    }
     $('#menu').innerHTML = html || '<div class="empty"><h3>Aucun résultat</h3><p>Essayez un autre mot-clé ou retirez un filtre.</p>' +
       '<p style="margin-top:16px"><button class="btn btn--ghost btn--sm" type="button" id="resetFilters">Réinitialiser les filtres</button></p></div>';
   }
@@ -402,7 +407,7 @@
 
     UI.openSheet({
       label: 'Paiement',
-      head: '<p class="eyebrow">Étape finale</p><h2>Payer &amp; commander</h2>',
+      head: '<p class="eyebrow">Étape finale</p><h2>' + (LIVE ? 'Valider la commande' : 'Payer &amp; commander') + '</h2>',
       body:
         (table
           ? '<div class="totals"><div class="totals__row"><span>Table</span><strong style="color:var(--ink)">' + esc(table) + '</strong></div>' +
@@ -410,12 +415,14 @@
           : '<label class="field"><span>Numéro de votre table</span><input id="tableInput" inputmode="numeric" maxlength="4" placeholder="Ex : 12" autofocus>' +
             '<small class="help">Indiqué sur le chevalet NFC posé sur votre table.</small></label>') +
         '<div class="pay-methods" role="radiogroup" aria-label="Moyen de paiement">' +
-          payMethodHTML('applepay', I.apple, walletLabel, 'Paiement express en un geste') +
-          payMethodHTML('card', I.card, 'Carte bancaire', 'Visa, Mastercard, Amex · via Stripe') +
+          (LIVE ? '' :
+            payMethodHTML('applepay', I.apple, walletLabel, 'Paiement express en un geste') +
+            payMethodHTML('card', I.card, 'Carte bancaire', 'Visa, Mastercard, Amex · via Stripe')) +
           payMethodHTML('onsite', I.wallet, 'Payer sur place', 'Le serveur passe avec le terminal en fin de repas') +
         '</div>' +
         '<div id="cardForm"></div>' +
-        '<p class="secure">' + I.lock + ' Paiement sécurisé par Stripe · Données chiffrées</p>',
+        (LIVE ? '<p class="secure">Vous réglerez directement à table, en fin de repas.</p>'
+              : '<p class="secure">' + I.lock + ' Paiement sécurisé par Stripe · Données chiffrées</p>'),
       footer: '<button class="btn btn--primary" type="button" id="payBtn"></button>',
       onMount: function (sheet) {
         var btn = $('#payBtn', sheet);
@@ -510,16 +517,23 @@
 
   function submit(btn, tableNo) {
     var s = cartSummary();
+
+    var label = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> ' + (state.payMethod === 'onsite' ? 'Envoi en cuisine…' : 'Paiement sécurisé en cours…');
 
-    simulatePayment(state.payMethod).then(function (payment) {
-      var order = T.createOrder({
+    // En ligne : le paiement se fait à table, la commande part directement.
+    var pay = LIVE ? Promise.resolve({ method: 'onsite', status: 'pending' }) : simulatePayment(state.payMethod);
+    pay.then(function (payment) {
+      return T.createOrder({
         table: tableNo,
         note: state.note,
         payment: payment,
         lines: s.lines.map(function (l) { return l.built; })
       });
+    }).then(function (order) {
+      state.cart = []; state.note = '';
+      saveCart();
       if (!table) {
         // Mémorise la table saisie pour la suite de la session.
         table = tableNo; scope = tableNo;
@@ -530,11 +544,18 @@
       }
       state.mine.push(order.id);
       T.write(MINE_KEY, state.mine);
-      state.cart = []; state.note = '';
-      saveCart();
+      T.track(order.id);
       UI.vibrate([20, 40, 20]);
       UI.closeSheet().then(function () { showTracking(order.id); });
       renderMenu();
+      renderCartBar();
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.innerHTML = label;
+      UI.toast(esc((err && err.message) || 'La commande n’a pas pu être envoyée. Réessayez.'), 4500);
+      UI.vibrate(60);
+      // La carte a peut-être changé (rupture) : on la recharge.
+      state.menu = T.getMenu(); renderMenu(); renderCartBar();
     });
   }
 
@@ -734,8 +755,8 @@
         if (o.status === 'prete' || o.status === 'servie') UI.vibrate([60, 60, 60]);
         renderTrackPill();
       }
-      if (msg.type === 'orders:sync' && state.trackingId) {
-        var cur = T.getOrder(state.trackingId);
+      if (msg.type === 'orders:sync') {
+        var cur = state.trackingId && T.getOrder(state.trackingId);
         if (cur) $('#trackRoot .track').innerHTML = trackHTML(cur);
         renderTrackPill();
       }
@@ -750,10 +771,20 @@
     });
   }
 
-  renderHeader();
-  renderChips();
-  renderMenu();
-  renderCartBar();
-  renderTrackPill();
-  bind();
+  function start() {
+    state.restaurant = T.getRestaurant();
+    state.menu = T.getMenu();
+    renderHeader();
+    renderChips();
+    renderMenu();
+    renderCartBar();
+    renderTrackPill();
+    bind();
+    T.track(state.mine);
+  }
+
+  T.ready.then(start, function (err) {
+    $('#menu').innerHTML = '<div class="empty"><h3>Menu momentanément indisponible</h3><p>' + esc(err.message) + '</p>' +
+      '<p style="margin-top:16px"><button class="btn btn--primary" type="button" onclick="location.reload()">Réessayer</button></p></div>';
+  });
 })();

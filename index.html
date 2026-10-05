@@ -39,6 +39,11 @@
     <p class="hub__tips">Astuce : ouvrez le menu et le dashboard dans deux onglets (ou côte à côte) du même navigateur : la synchronisation est instantanée.</p>
   </main>
 
+  <script src="js/config.js"></script>
+  <script>
+    // En ligne, la racine du site mène directement au menu client.
+    if (window.TAPIGO_CONFIG && TAPIGO_CONFIG.supabaseUrl) location.replace('menu.html' + location.search);
+  </script>
   <script src="js/data.js"></script>
   <script src="js/store.js"></script>
   <script>

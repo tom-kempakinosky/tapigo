@@ -137,8 +137,6 @@
     });
   }
 
-  if (!read(K.menu, null)) seed();
-
   /* ---------------- Restaurant & Menu ---------------- */
   function getRestaurant() { return read(K.restaurant, DEMO.restaurant); }
 
@@ -152,7 +150,7 @@
   }
 
   function getItem(id) {
-    return getMenu().items.filter(function (i) { return i.id === id; })[0] || null;
+    return window.Tapigo.getMenu().items.filter(function (i) { return i.id === id; })[0] || null;
   }
 
   function slug(s) {
@@ -192,7 +190,7 @@
   /* ---------------- Commandes ---------------- */
   // selections : { groupId: [label, ...] }
   function buildLine(itemId, qty, selections, note) {
-    var item = getItem(itemId);
+    var item = window.Tapigo.getItem(itemId);
     if (!item) return null;
     var unit = item.price;
     var options = [];
@@ -298,6 +296,11 @@
   function minutesSince(ts) { return Math.max(0, Math.floor((Date.now() - ts) / 60000)); }
 
   window.Tapigo = {
+    mode: 'demo',
+    ready: Promise.resolve(),
+    track: function () { return Promise.resolve(); },
+    _emit: emit,
+    _slug: slug,
     STATUSES: STATUSES,
     statusInfo: statusInfo,
     subscribe: subscribe,
@@ -322,4 +325,6 @@
     clock: clock,
     minutesSince: minutesSince
   };
+
+  if (!read(K.menu, null)) seed();
 })();
