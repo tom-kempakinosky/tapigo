@@ -29,7 +29,7 @@
   var emit = T._emit;
   var sb = null;
   var current = null; // { id, slug, role }
-  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [] };
+  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {} };
   var pendingMenuWrites = 0;
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
@@ -197,12 +197,52 @@
     persist({ menu: cache.menu });
   };
 
+  // Rupture / remise en vente : autorisée à toute l'équipe (pas seulement au gérant).
   T.setAvailable = function (id, available) {
-    var item = T.getItem(id);
+    var item = (cache.menu && cache.menu.items || []).filter(function (i) { return i.id === id; })[0];
     if (!item) return;
     item.available = !!available;
-    T.saveItem(item);
+    emit('menu:updated', { id: id });
+    sb.rpc('set_item_available', { p_restaurant: current.id, p_item: id, p_available: !!available })
+      .then(function (r) { if (r.error) { fail(r.error); refreshRestaurant().catch(function () {}); } });
   };
+
+  /* ---------------- Stocks ---------------- */
+  // null = illimité ; 0 = épuisé (plus commandable).
+  T.getStock = function (id) { return id in cache.stock ? cache.stock[id] : null; };
+  T.getStocks = function () { return clone(cache.stock); };
+
+  T.setStock = function (id, quantity) {
+    if (quantity == null) delete cache.stock[id]; else cache.stock[id] = quantity;
+    emit('stock:updated', { id: id, quantity: quantity, local: true });
+    return sb.rpc('set_stock', { p_restaurant: current.id, p_item: id, p_quantity: quantity })
+      .then(function (r) { if (r.error) { fail(r.error); loadStock(); } });
+  };
+
+  function loadStock() {
+    return sb.from('item_stock').select('item_id, quantity').eq('restaurant_id', current.id).then(function (r) {
+      if (r.error) throw r.error;
+      cache.stock = {};
+      (r.data || []).forEach(function (x) { cache.stock[x.item_id] = x.quantity; });
+      emit('stock:updated', null);
+    });
+  }
+
+  function subscribeStock() {
+    sb.channel('tapigo-stock-' + current.id)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'item_stock', filter: 'restaurant_id=eq.' + current.id }, function (p) {
+        if (p.eventType === 'DELETE') {
+          if (p.old && p.old.item_id) delete cache.stock[p.old.item_id];
+          else return loadStock().catch(function () {});
+          emit('stock:updated', { id: p.old.item_id, quantity: null });
+          return;
+        }
+        var before = cache.stock[p.new.item_id];
+        cache.stock[p.new.item_id] = p.new.quantity;
+        if (before !== p.new.quantity) emit('stock:updated', { id: p.new.item_id, quantity: p.new.quantity });
+      })
+      .subscribe(function (status) { if (status === 'SUBSCRIBED') loadStock().catch(function () {}); });
+  }
 
   T.resetDemo = function () { /* sans objet en ligne */ };
 
@@ -267,7 +307,8 @@
       current = { id: rows[0].id, slug: rows[0].slug, role: null };
       applyRestaurant(rows[0]);
       subscribeRestaurant();
-      return clone(current);
+      subscribeStock();
+      return loadStock().catch(function () {}).then(function () { return clone(current); });
     });
   };
 
@@ -452,7 +493,8 @@
       if (!r.data) throw new Error('Restaurant introuvable.');
       applyRestaurant(r.data);
       subscribeRestaurant();
-      return loadOrders();
+      subscribeStock();
+      return Promise.all([loadOrders(), loadStock()]);
     }).then(function () {
       sb.channel('tapigo-orders-' + current.id)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: 'restaurant_id=eq.' + current.id }, function (p) {

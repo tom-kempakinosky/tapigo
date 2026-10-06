@@ -653,6 +653,87 @@
   }
 
   /* ======================================================================
+     Stocks — gérés par toute l'équipe (gérant ou non)
+     ====================================================================== */
+  var stockQ = '';
+  var LOW = 5;
+
+  function stockState(item) {
+    var st = T.getStock(item.id);
+    if (item.available === false) return 'off';
+    if (st === 0) return 'out';
+    if (st != null && st <= LOW) return 'low';
+    return 'ok';
+  }
+
+  function updateStockBadge() {
+    var n = T.getMenu().items.filter(function (i) { var s = stockState(i); return s === 'out' || s === 'low'; }).length;
+    var c = $('#stockCount');
+    c.hidden = !n;
+    c.textContent = n;
+  }
+
+  function stockRowHTML(i) {
+    var st = T.getStock(i.id), state = stockState(i), on = i.available !== false;
+    var label = { off: 'En rupture', out: 'Épuisé', low: 'Stock bas', ok: st == null ? 'Illimité' : 'En stock' }[state];
+    var badge = { off: 'badge--danger', out: 'badge--danger', low: 'badge--warn', ok: st == null ? '' : 'badge--ok' }[state];
+    return '<div class="stock-row stock-row--' + state + '" data-stock="' + esc(i.id) + '">' +
+      UI.media(i, 'editor-row__thumb') +
+      '<div class="editor-row__name"><strong>' + esc(i.name) + '</strong><span class="badge ' + badge + '">' + label + '</span></div>' +
+      '<div class="qty-ctrl" role="group" aria-label="Quantité restante de ' + esc(i.name) + '">' +
+        '<button class="icon-btn" type="button" data-qty="-1" aria-label="Retirer un"' + (st ? '' : ' disabled') + '>−</button>' +
+        '<input type="number" min="0" max="100000" inputmode="numeric" data-qty-input value="' + (st == null ? '' : st) + '" placeholder="∞" aria-label="Quantité restante">' +
+        '<button class="icon-btn" type="button" data-qty="1" aria-label="Ajouter un">+</button>' +
+      '</div>' +
+      '<div class="stock-row__quick">' +
+        '<button class="btn btn--ghost btn--sm" type="button" data-qty-set="0">Épuisé</button>' +
+        '<button class="btn btn--ghost btn--sm" type="button" data-qty-set="">Illimité</button>' +
+      '</div>' +
+      '<label class="switch"><input type="checkbox" data-stock-avail' + (on ? ' checked' : '') + '><span class="switch__track"></span><span>' + (on ? 'En vente' : 'Rupture') + '</span></label>' +
+    '</div>';
+  }
+
+  function renderStock() {
+    var menu = T.getMenu();
+    var q = norm(stockQ);
+    var items = menu.items.filter(function (i) { return !q || norm(i.name).indexOf(q) >= 0; });
+    var count = function (k) { return menu.items.filter(function (i) { return stockState(i) === k; }).length; };
+    var alerts = menu.items.filter(function (i) { var s = stockState(i); return s === 'out' || s === 'low' || s === 'off'; });
+
+    var html = '<div class="editor">' +
+      '<div class="stat-tiles">' +
+        '<div class="stat-tile"><span>Épuisés ou en rupture</span><b>' + (count('out') + count('off')) + '</b><small>invisibles côté client</small></div>' +
+        '<div class="stat-tile"><span>Stock bas</span><b>' + count('low') + '</b><small>' + LOW + ' restants ou moins</small></div>' +
+        '<div class="stat-tile"><span>Suivis en quantité</span><b>' + Object.keys(T.getStocks()).length + '</b><small>les autres sont illimités</small></div>' +
+      '</div>' +
+      '<p class="help">Indiquez combien de portions il reste : chaque commande les décompte automatiquement et, à 0, le plat disparaît de la carte client. ' +
+        'Laissez vide pour un stock illimité. Toute l’équipe peut gérer les stocks ; les prix et la carte restent réservés au gérant.</p>' +
+      '<label class="search">' + I.search + '<input id="stockSearch" type="search" placeholder="Rechercher un produit…" value="' + esc(stockQ) + '" aria-label="Rechercher un produit"></label>' +
+      (alerts.length && !q ? '<section class="editor-cat"><h2>À surveiller</h2><div class="editor-list">' + alerts.map(stockRowHTML).join('') + '</div></section>' : '') +
+      menu.categories.map(function (c) {
+        var list = items.filter(function (i) { return i.category === c.id && (q || alerts.indexOf(i) < 0); });
+        if (!list.length) return '';
+        return '<section class="editor-cat"><h2>' + esc(c.label) + '</h2><div class="editor-list">' + list.map(stockRowHTML).join('') + '</div></section>';
+      }).join('') +
+    '</div>';
+
+    var view = $('#stockView');
+    var focus = document.activeElement && document.activeElement.id === 'stockSearch';
+    var caret = focus ? document.activeElement.selectionStart : 0;
+    view.innerHTML = html;
+    if (focus) { var s = $('#stockSearch'); s.focus(); s.setSelectionRange(caret, caret); }
+    updateStockBadge();
+  }
+
+  function applyQty(id, value) {
+    var item = T.getItem(id);
+    if (!item) return;
+    var q = value === '' || value == null ? null : Math.max(0, Math.min(100000, parseInt(value, 10) || 0));
+    T.setStock(id, q);
+    if (q === 0) UI.toast('<strong>' + esc(item.name) + '</strong> épuisé · retiré de la carte client');
+  }
+
+  /* ======================================================================
      Statistiques
      ====================================================================== */
   var statsDays = 30;
@@ -704,8 +785,10 @@
     $('#ordersView').hidden = v !== 'orders';
     $('#menuView').hidden = v !== 'menu';
     $('#statsView').hidden = v !== 'stats';
+    $('#stockView').hidden = v !== 'stock';
     if (v === 'orders') renderOrders();
     else if (v === 'menu') renderMenuEditor();
+    else if (v === 'stock') renderStock();
     else renderStats();
   }
 
@@ -765,6 +848,38 @@
       } else if (ticket.classList.contains('is-new')) {
         T.markSeen(ticket.dataset.order);
       }
+    });
+
+    var stockView = $('#stockView');
+    stockView.addEventListener('input', function (e) {
+      if (e.target.id === 'stockSearch') { stockQ = e.target.value; renderStock(); }
+    });
+    stockView.addEventListener('click', function (e) {
+      var row = e.target.closest('[data-stock]');
+      if (!row) return;
+      var id = row.dataset.stock;
+      var b = e.target.closest('[data-qty]');
+      if (b) {
+        var cur = T.getStock(id);
+        return applyQty(id, Math.max(0, (cur || 0) + Number(b.dataset.qty)));
+      }
+      var set = e.target.closest('[data-qty-set]');
+      if (set) return applyQty(id, set.dataset.qtySet);
+    });
+    stockView.addEventListener('change', function (e) {
+      var row = e.target.closest('[data-stock]');
+      if (!row) return;
+      if (e.target.matches('[data-qty-input]')) applyQty(row.dataset.stock, e.target.value.trim());
+      if (e.target.matches('[data-stock-avail]')) {
+        var item = T.getItem(row.dataset.stock);
+        T.setAvailable(row.dataset.stock, e.target.checked);
+        UI.toast(e.target.checked
+          ? '<strong>' + esc(item.name) + '</strong> de nouveau en vente'
+          : '<strong>' + esc(item.name) + '</strong> en rupture · masqué du menu client');
+      }
+    });
+    stockView.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && e.target.matches('[data-qty-input]')) e.target.blur();
     });
 
     var menuView = $('#menuView');
@@ -827,6 +942,15 @@
       if ((msg.type === 'menu:updated' || msg.type === 'demo:reset') && state.view === 'menu') renderMenuEditor();
       if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') { renderBrand(); renderPause(); }
       if (msg.type === 'service:created') announceService(msg.payload);
+      if (msg.type === 'stock:updated' || msg.type === 'menu:updated' || msg.type === 'demo:reset') {
+        updateStockBadge();
+        if (state.view === 'stock' && !(document.activeElement && document.activeElement.matches('[data-qty-input]'))) renderStock();
+        var p = msg.payload;
+        if (msg.type === 'stock:updated' && p && !p.local && p.quantity === 0) {
+          var it = T.getItem(p.id);
+          if (it) UI.toast('⚠ <strong>' + esc(it.name) + '</strong> est épuisé', 5000);
+        }
+      }
       if (/^service:/.test(msg.type) && state.view === 'orders') renderOrders();
       if (msg.type === 'error') UI.toast('⚠ ' + esc(msg.payload.message), 5000);
     });
@@ -864,6 +988,7 @@
     renderSound();
     renderPause();
     bind();
+    updateStockBadge();
     setView('orders');
     tickTimers();
   }

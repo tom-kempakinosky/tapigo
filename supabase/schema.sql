@@ -201,6 +201,11 @@ declare
   v_total   numeric := 0;
   v_number  int;
   v_order   public.orders;
+  v_need    jsonb := '{}'::jsonb;
+  v_key     text;
+  v_val     int;
+  v_stock   int;
+  v_name    text;
 begin
   select id, menu, info into v_rid, v_menu, v_info from public.restaurants where slug = p_restaurant and active;
   if v_rid is null then
@@ -247,10 +252,14 @@ begin
     limit 1;
 
     if v_item is null then
-      raise exception 'Produit indisponible : %', coalesce(v_req ->> 'itemId', '?');
+      select x.value ->> 'name' into v_name
+      from jsonb_array_elements(coalesce(v_menu -> 'items', '[]'::jsonb)) x
+      where x.value ->> 'id' = v_req ->> 'itemId' limit 1;
+      raise exception '« % » n''est plus disponible', coalesce(v_name, v_req ->> 'itemId', '?');
     end if;
 
     v_qty := least(greatest(coalesce((v_req ->> 'qty')::int, 1), 1), 20);
+    v_need := jsonb_set(v_need, array[v_item ->> 'id'], to_jsonb(coalesce((v_need ->> (v_item ->> 'id'))::int, 0) + v_qty));
     v_unit := coalesce((v_item ->> 'price')::numeric, 0);
     v_options := '[]'::jsonb;
 
@@ -293,6 +302,26 @@ begin
       'note', left(coalesce(v_req ->> 'note', ''), 140)
     ));
     v_total := v_total + v_unit * v_qty;
+  end loop;
+
+  -- Stocks : vérifiés puis décrémentés sous verrou (deux clients ne peuvent
+  -- pas commander le dernier plat en même temps).
+  for v_key, v_val in select key, value::int from jsonb_each_text(v_need) loop
+    select quantity into v_stock from public.item_stock
+    where restaurant_id = v_rid and item_id = v_key
+    for update;
+    if found then
+      if v_stock < v_val then
+        select x.value ->> 'name' into v_name
+        from jsonb_array_elements(v_menu -> 'items') x where x.value ->> 'id' = v_key limit 1;
+        if v_stock = 0 then
+          raise exception '« % » est épuisé', v_name;
+        end if;
+        raise exception 'Il ne reste que % « % »', v_stock, v_name;
+      end if;
+      update public.item_stock set quantity = quantity - v_val, updated_at = now()
+      where restaurant_id = v_rid and item_id = v_key;
+    end if;
   end loop;
 
   -- Numéro de commande propre à chaque restaurant. On ne modifie PAS la fiche
@@ -670,6 +699,61 @@ begin
 end;
 $$;
 
+
+-- ---------- Stocks (gérés par toute l'équipe, gérant ou non) ----------
+-- Pas de ligne = stock illimité. À 0, le plat n'est plus commandable.
+create table if not exists public.item_stock (
+  restaurant_id uuid not null references public.restaurants (id) on delete cascade,
+  item_id       text not null,
+  quantity      int not null check (quantity >= 0),
+  updated_at    timestamptz not null default now(),
+  primary key (restaurant_id, item_id)
+);
+alter table public.item_stock enable row level security;
+drop policy if exists "Stocks visibles par tous" on public.item_stock;
+create policy "Stocks visibles par tous" on public.item_stock for select using (true);
+revoke insert, update, delete on public.item_stock from anon, authenticated;
+grant select on public.item_stock to anon, authenticated;
+
+create or replace function public.set_stock(p_restaurant uuid, p_item text, p_quantity int)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if public.member_role(p_restaurant) is null then raise exception 'Accès refusé'; end if;
+  if p_quantity is null then
+    delete from public.item_stock where restaurant_id = p_restaurant and item_id = p_item;
+    return;
+  end if;
+  if p_quantity < 0 or p_quantity > 100000 then raise exception 'Quantité invalide'; end if;
+  insert into public.item_stock (restaurant_id, item_id, quantity)
+  values (p_restaurant, p_item, p_quantity)
+  on conflict (restaurant_id, item_id) do update set quantity = excluded.quantity, updated_at = now();
+end;
+$$;
+
+-- Rupture / remise en vente d'un plat par n'importe quel membre de l'équipe
+-- (sans pouvoir toucher aux prix ni au reste de la carte).
+create or replace function public.set_item_available(p_restaurant uuid, p_item text, p_available boolean)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_idx int;
+begin
+  if public.member_role(p_restaurant) is null then raise exception 'Accès refusé'; end if;
+  perform 1 from public.restaurants where id = p_restaurant for update;
+  select (x.ord - 1)::int into v_idx
+  from public.restaurants r, jsonb_array_elements(r.menu -> 'items') with ordinality as x(value, ord)
+  where r.id = p_restaurant and x.value ->> 'id' = p_item;
+  if v_idx is null then raise exception 'Produit introuvable'; end if;
+  update public.restaurants
+  set menu = jsonb_set(menu, array['items', v_idx::text, 'available'], to_jsonb(p_available)),
+      updated_at = now()
+  where id = p_restaurant;
+end;
+$$;
+
 -- ---------- Droits d'exécution ----------
 revoke all on function public.place_order(text, text, jsonb, text) from public;
 revoke all on function public.get_order(uuid) from public;
@@ -699,6 +783,10 @@ revoke all on function public.admin_seed_demo_orders(uuid, int) from public;
 revoke all on function public.admin_clear_demo_orders(uuid) from public;
 grant execute on function public.request_service(text, text, text) to anon, authenticated;
 grant execute on function public.close_table(uuid, text) to authenticated;
+revoke all on function public.set_stock(uuid, text, int) from public;
+revoke all on function public.set_item_available(uuid, text, boolean) from public;
+grant execute on function public.set_stock(uuid, text, int) to authenticated;
+grant execute on function public.set_item_available(uuid, text, boolean) to authenticated;
 grant execute on function public.admin_seed_demo_orders(uuid, int) to authenticated;
 grant execute on function public.admin_clear_demo_orders(uuid) to authenticated;
 
@@ -718,6 +806,12 @@ end $$;
 do $$
 begin
   alter publication supabase_realtime add table public.service_requests;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.item_stock;
 exception when duplicate_object then null;
 end $$;
 

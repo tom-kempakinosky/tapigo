@@ -29,7 +29,8 @@
     menu: NS + 'menu',
     orders: NS + 'orders',
     seq: NS + 'seq',
-    requests: NS + 'requests'
+    requests: NS + 'requests',
+    stock: NS + 'stock'
   };
 
   var memory = {};
@@ -64,18 +65,23 @@
     });
   }
 
+  // En ligne, chaque onglet a son propre temps réel Supabase : le relais entre
+  // onglets (utile en démo) créerait des doublons (alertes, sonneries).
+  function isLive() { return window.Tapigo && window.Tapigo.mode === 'live'; }
+
   function emit(type, payload) {
     var msg = { type: type, payload: payload, at: Date.now() };
     notify(msg, false);
-    if (bc) bc.postMessage(msg);
+    if (bc && !isLive()) bc.postMessage(msg);
   }
 
   if (bc) {
-    bc.onmessage = function (e) { notify(e.data, true); };
+    bc.onmessage = function (e) { if (!isLive()) notify(e.data, true); };
   } else {
     window.addEventListener('storage', function (e) {
       if (e.key === K.orders) notify({ type: 'orders:sync' }, true);
       if (e.key === K.requests) notify({ type: 'service:updated' }, true);
+      if (e.key === K.stock) notify({ type: 'stock:updated' }, true);
       if (e.key === K.menu) notify({ type: 'menu:updated' }, true);
       if (e.key === K.restaurant) notify({ type: 'restaurant:updated' }, true);
     });
@@ -238,8 +244,33 @@
     return o;
   }
 
+  function getStock(id) { var m = read(K.stock, {}); return id in m ? m[id] : null; }
+  function getStocks() { return read(K.stock, {}); }
+  function setStock(id, quantity) {
+    var m = read(K.stock, {});
+    if (quantity == null) delete m[id]; else m[id] = quantity;
+    write(K.stock, m);
+    emit('stock:updated', { id: id, quantity: quantity });
+    return Promise.resolve();
+  }
+
   function createOrder(payload, opts) {
     var lines = (payload.lines || []).filter(Boolean);
+    // Stocks : vérifiés puis décrémentés.
+    var stock = read(K.stock, {}), need = {};
+    lines.forEach(function (l) { need[l.itemId] = (need[l.itemId] || 0) + l.qty; });
+    Object.keys(need).forEach(function (id) {
+      if (id in stock && stock[id] < need[id]) {
+        var it = window.Tapigo.getItem(id);
+        throw new Error(stock[id] === 0 ? '« ' + (it ? it.name : id) + ' » est épuisé' : 'Il ne reste que ' + stock[id] + ' « ' + (it ? it.name : id) + ' »');
+      }
+    });
+    var touched = Object.keys(need).filter(function (id) { return id in stock; });
+    touched.forEach(function (id) { stock[id] -= need[id]; });
+    if (touched.length) {
+      write(K.stock, stock);
+      touched.forEach(function (id) { emit('stock:updated', { id: id, quantity: stock[id] }); });
+    }
     var total = lines.reduce(function (s, l) { return s + l.unitPrice * l.qty; }, 0);
     var seq = read(K.seq, 1040) + 1;
     write(K.seq, seq);
@@ -452,6 +483,9 @@
     markSeen: markSeen,
     resetDemo: resetDemo,
     requestService: requestService,
+    getStock: getStock,
+    getStocks: getStocks,
+    setStock: setStock,
     getServiceRequests: getServiceRequests,
     completeServiceRequest: completeServiceRequest,
     closeTable: closeTable,

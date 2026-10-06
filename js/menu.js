@@ -160,8 +160,19 @@
   /* ======================================================================
      Filtres & recherche
      ====================================================================== */
+  // Commandable : pas en rupture et stock non épuisé.
+  function isOrderable(item) { return item && item.available !== false && T.getStock(item.id) !== 0; }
+
+  // Quantité maximale commandable (stock restant moins ce qui est déjà au panier).
+  function maxQty(itemId, exceptLine) {
+    var st = T.getStock(itemId);
+    if (st == null) return 20;
+    var inCart = state.cart.reduce(function (sum, l) { return sum + (l.itemId === itemId && l !== exceptLine ? l.qty : 0); }, 0);
+    return Math.max(0, Math.min(20, st - inCart));
+  }
+
   function availableItems() {
-    return state.menu.items.filter(function (i) { return i.available !== false; });
+    return state.menu.items.filter(isOrderable);
   }
 
   function matches(item) {
@@ -197,6 +208,8 @@
     return state.cart.reduce(function (s, l) { return s + (l.itemId === itemId ? l.qty : 0); }, 0);
   }
 
+  function lowStock(id) { var st = T.getStock(id); return st != null && st > 0 && st <= 5; }
+
   function dishHTML(item, idx) {
     var tags = state.menu.tags || {};
     var q = qtyInCart(item.id);
@@ -208,6 +221,7 @@
         '<div class="dish__title"><h3>' + esc(item.name) + '</h3>' + (signature ? '<span class="badge badge--gold">Signature</span>' : '') + '</div>' +
         '<p class="dish__desc">' + esc(item.description) + '</p>' +
         '<div class="dish__meta"><span class="price">' + fmt(item.price) + '</span>' +
+          (lowStock(item.id) ? '<span class="badge badge--warn">Plus que ' + T.getStock(item.id) + '</span>' : '') +
           (item.options && item.options.length ? '<span class="dish__tags">Personnalisable</span>' : '') +
           (tagText ? '<span class="dish__tags">' + tagText + '</span>' : '') +
         '</div>' +
@@ -264,7 +278,7 @@
   }
 
   function pairingsHTML(item) {
-    var list = (item.pairings || []).map(T.getItem).filter(function (p) { return p && p.available !== false; });
+    var list = (item.pairings || []).map(T.getItem).filter(isOrderable);
     if (!list.length) return '';
     return '<div class="pairings"><p class="eyebrow">Parfait avec</p>' + list.map(function (p) {
       return '<button class="pair" type="button" data-pair="' + esc(p.id) + '">' + UI.media(p, 'pair__media') +
@@ -274,7 +288,7 @@
 
   function openProduct(id) {
     var item = T.getItem(id);
-    if (!item || item.available === false) return;
+    if (!isOrderable(item)) return UI.toast('Ce plat n’est plus disponible');
     var qty = 1;
     var tags = state.menu.tags || {};
 
@@ -302,6 +316,7 @@
         '<h2>' + esc(item.name) + '</h2>',
       body:
         '<p class="product-desc">' + esc(item.description) + '</p>' +
+        (lowStock(item.id) ? '<p><span class="badge badge--warn">Plus que ' + T.getStock(item.id) + ' disponible' + (T.getStock(item.id) > 1 ? 's' : '') + '</span></p>' : '') +
         allergensHTML(item) +
         pairingsHTML(item) +
         groups +
@@ -332,10 +347,11 @@
           if (pair) {
             var p = T.getItem(pair.dataset.pair);
             if (p && !(p.options || []).some(function (g) { return g.required; })) {
-              addToCart(p.id, 1, {}, '');
-              pair.disabled = true;
-              pair.querySelector('.pair__add').textContent = '✓';
-              UI.toast('<strong>' + esc(p.name) + '</strong> ajouté au panier', 1800);
+              if (addToCart(p.id, 1, {}, '')) {
+                pair.disabled = true;
+                pair.querySelector('.pair__add').textContent = '✓';
+                UI.toast('<strong>' + esc(p.name) + '</strong> ajouté au panier', 1800);
+              }
             } else if (p) {
               UI.closeSheet().then(function () { openProduct(p.id); });
             }
@@ -344,7 +360,12 @@
           var input = e.target.closest('.opt-group[data-type="single"][data-required="false"] input');
           if (input && wasChecked) { input.checked = false; wasChecked = null; update(); }
           var step = e.target.closest('[data-step]');
-          if (step) { qty = Math.min(20, Math.max(1, qty + Number(step.dataset.step))); update(); }
+          if (step) {
+            var max = Math.max(1, maxQty(item.id));
+            if (Number(step.dataset.step) > 0 && qty >= max && T.getStock(item.id) != null) UI.toast('Plus que ' + max + ' disponible' + (max > 1 ? 's' : ''));
+            qty = Math.min(max, Math.max(1, qty + Number(step.dataset.step)));
+            update();
+          }
         });
         sheet.addEventListener('change', function (e) {
           var g = e.target.closest('.opt-group');
@@ -370,9 +391,10 @@
             UI.vibrate(40);
             return;
           }
-          addToCart(item.id, qty, sel, $('#pNote', sheet).value.trim());
+          var added = addToCart(item.id, qty, sel, $('#pNote', sheet).value.trim());
+          if (!added) return;
           UI.closeSheet();
-          UI.toast('<strong>' + qty + ' × ' + esc(item.name) + '</strong> ajouté au panier');
+          UI.toast('<strong>' + added + ' × ' + esc(item.name) + '</strong> ajouté au panier');
         });
       }
     });
@@ -394,12 +416,16 @@
   function addToCart(itemId, qty, sel, note) {
     var key = lineKey(itemId, sel, note);
     var existing = state.cart.filter(function (l) { return l.key === key; })[0];
+    var room = maxQty(itemId);
+    if (room <= 0) { UI.toast('Plus aucun disponible pour le moment'); return false; }
+    qty = Math.min(qty, room);
     if (existing) existing.qty = Math.min(50, existing.qty + qty);
     else state.cart.push({ key: key, itemId: itemId, qty: qty, selections: sel, note: note });
     saveCart();
     renderCartBar(true);
     renderMenu();
     UI.vibrate(15);
+    return qty; // quantité réellement ajoutée (plafonnée au stock)
   }
 
   /* Prix toujours recalculés depuis le menu courant (le restaurateur peut changer un prix). */
@@ -407,7 +433,7 @@
     return state.cart.map(function (l) {
       var item = T.getItem(l.itemId);
       var built = item ? T.buildLine(l.itemId, l.qty, l.selections, l.note) : null;
-      return { raw: l, item: item, built: built, unavailable: !item || item.available === false };
+      return { raw: l, item: item, built: built, unavailable: !isOrderable(item) };
     });
   }
 
@@ -494,6 +520,10 @@
           if (!t) return;
           if (t.dataset.qty != null) {
             var l = state.cart[+t.dataset.qty];
+            if (Number(t.dataset.d) > 0 && maxQty(l.itemId, l) <= l.qty) {
+              UI.toast('Plus que ' + T.getStock(l.itemId) + ' disponible' + (T.getStock(l.itemId) > 1 ? 's' : ''));
+              return;
+            }
             l.qty += Number(t.dataset.d);
             if (l.qty <= 0) state.cart.splice(+t.dataset.qty, 1);
             saveCart(); paint(); renderMenu();
@@ -854,8 +884,7 @@
         var item = T.getItem(add.dataset.add);
         // Ajout express si le plat n'a aucune option obligatoire.
         if (item && !(item.options || []).some(function (g) { return g.required; })) {
-          addToCart(item.id, 1, {}, '');
-          UI.toast('<strong>' + esc(item.name) + '</strong> ajouté au panier', 1800);
+          if (addToCart(item.id, 1, {}, '')) UI.toast('<strong>' + esc(item.name) + '</strong> ajouté au panier', 1800);
           return;
         }
         return openProduct(add.dataset.add);
@@ -899,6 +928,7 @@
         if (cur) $('#trackRoot .track').innerHTML = trackHTML(cur);
         renderTrackPill();
       }
+      if (msg.type === 'stock:updated') { renderChips(); renderMenu(); renderCartBar(); }
       if (msg.type === 'menu:updated' || msg.type === 'demo:reset') {
         state.menu = T.getMenu();
         renderChips(); renderMenu(); renderCartBar();

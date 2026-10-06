@@ -67,7 +67,8 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - Bouton **Pause** pour suspendre les commandes en ligne lors d'un coup de feu.
 - Carte : catégories (ajout, renommage, ordre), photos envoyées depuis le téléphone, allergènes, suggestions, prix et ruptures en direct.
 - **Statistiques** : chiffre d'affaires par jour, affluence par heure, plats les plus vendus, panier moyen, temps de préparation, part cuisine / bar, export CSV.
-- Rôles : Gérant (tout) / Équipe (commandes uniquement).
+- **Stocks** (toute l'équipe, gérant ou non) : quantités restantes décomptées à chaque commande, plat retiré de la carte à 0, « Plus que N » côté client, mise en rupture / remise en vente, alerte « épuisé » en cuisine.
+- Rôles : Gérant (tout) / Équipe (commandes et stocks ; ni prix, ni carte, ni statistiques).
 
 **Tapigo** (`admin.html`)
 - Création des restaurants, gestion des accès, lien NFC unique par restaurant.
