@@ -9,6 +9,9 @@
   var $ = function (s, root) { return (root || document).querySelector(s); };
   var ROLE_LABEL = { owner: 'Gérant', equipe: 'Équipe' };
   var restaurants = [];
+  var billing = {};
+  var BILLING_STATUS = { essai: 'Période d’essai', a_jour: 'À jour', en_retard: 'En retard', resilie: 'Résilié' };
+  var BILLING_BADGE = { essai: 'badge--info', a_jour: 'badge--ok', en_retard: 'badge--danger', resilie: '' };
 
   function baseUrl(page) { return location.href.replace(/admin\.html.*$/, page); }
 
@@ -31,6 +34,26 @@
       '</form></section>';
   }
 
+  function billingHTML(r) {
+    var b = billing[r.id] || { plan: 'Standard', monthly_price: 49, status: 'essai', next_billing: '', notes: '' };
+    return '<details class="billing"><summary><span class="eyebrow">Abonnement</span> ' +
+        '<span class="badge ' + (BILLING_BADGE[b.status] || '') + '">' + esc(BILLING_STATUS[b.status]) + '</span> ' +
+        '<span class="help">' + esc(b.plan) + ' · ' + T.fmt(b.monthly_price) + ' / mois' +
+        (b.next_billing ? ' · prochaine échéance le ' + esc(new Date(b.next_billing).toLocaleDateString('fr-FR')) : '') + '</span></summary>' +
+      '<form class="form-grid" data-billing novalidate style="margin-top:12px">' +
+        '<label class="field"><span>Formule</span><input name="plan" maxlength="30" value="' + esc(b.plan) + '"></label>' +
+        '<label class="field"><span>Prix mensuel (€ HT)</span><input name="price" inputmode="decimal" value="' + esc(String(b.monthly_price).replace('.', ',')) + '"></label>' +
+        '<label class="field"><span>Statut</span><select name="status">' + Object.keys(BILLING_STATUS).map(function (k) {
+          return '<option value="' + k + '"' + (k === b.status ? ' selected' : '') + '>' + BILLING_STATUS[k] + '</option>';
+        }).join('') + '</select></label>' +
+        '<label class="field"><span>Prochaine échéance</span><input name="next" type="date" value="' + esc(b.next_billing || '') + '"></label>' +
+        '<label class="field span-2"><span>Notes internes</span><input name="notes" maxlength="200" value="' + esc(b.notes || '') + '" placeholder="Contact, conditions…"></label>' +
+        '<button class="btn btn--primary span-2" type="submit">Enregistrer l’abonnement</button>' +
+        '<p class="help span-2">Pas de commission sur les ventes : le restaurant paie uniquement son abonnement. ' +
+          'Un abonnement « En retard » peut être suspendu avec l’interrupteur Actif.</p>' +
+      '</form></details>';
+  }
+
   function restaurantHTML(r) {
     return '<section class="hub-card" data-rid="' + esc(r.id) + '">' +
       '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">' +
@@ -44,9 +67,11 @@
         '<a class="btn btn--ghost btn--sm" target="_blank" rel="noopener" href="menu.html?r=' + esc(r.slug) + '">Menu client</a>' +
         '<a class="btn btn--ghost btn--sm" href="kitchen.html?r=' + esc(r.slug) + '">Dashboard</a>' +
         '<button class="btn btn--soft btn--sm" type="button" data-copy-links>Copier le lien NFC</button>' +
+        '<button class="btn btn--ghost btn--sm" type="button" data-seed title="Commandes fictives pour présenter les statistiques">Données de démo</button>' +
       '</div>' +
       '<p class="help">Lien à écrire sur <strong>toutes</strong> les plaques NFC du restaurant (le client indique sa table) :<br>' +
         '<code style="word-break:break-all">' + esc(nfcLink(r)) + '</code></p>' +
+      billingHTML(r) +
       '<div><p class="eyebrow" style="margin-bottom:8px">Accès</p><div class="order-list" data-members><p class="help">Chargement…</p></div></div>' +
       '<form class="form-grid member-form" data-add-member novalidate>' +
         '<label class="field"><span>E-mail du compte</span><input type="email" name="email" required placeholder="gerant@restaurant.fr"></label>' +
@@ -77,10 +102,21 @@
   }
 
   function render() {
-    return T.admin.listRestaurants().then(function (list) {
+    return Promise.all([T.admin.listRestaurants(), T.admin.listBilling().catch(function () { return {}; })]).then(function (res) {
+      var list = res[0];
+      billing = res[1];
       restaurants = list;
+      var mrr = list.reduce(function (sum, r) {
+        var b = billing[r.id];
+        return sum + (b && b.status === 'a_jour' ? Number(b.monthly_price) : 0);
+      }, 0);
+      var late = list.filter(function (r) { return billing[r.id] && billing[r.id].status === 'en_retard'; }).length;
       $('#adminView').innerHTML = createFormHTML() +
-        '<p class="eyebrow">' + list.length + ' restaurant' + (list.length > 1 ? 's' : '') + '</p>' +
+        '<div class="stat-tiles">' +
+          '<div class="stat-tile"><span>Restaurants</span><b>' + list.length + '</b><small>' + list.filter(function (r) { return r.active; }).length + ' actifs</small></div>' +
+          '<div class="stat-tile"><span>Revenu mensuel</span><b>' + T.fmt(mrr) + '</b><small>abonnements à jour</small></div>' +
+          '<div class="stat-tile"><span>Paiements en retard</span><b>' + late + '</b><small>' + (late ? 'à relancer' : 'tout va bien') + '</small></div>' +
+        '</div>' +
         list.slice().reverse().map(restaurantHTML).join('');
       document.querySelectorAll('[data-rid]').forEach(loadMembers);
     }).catch(function (err) { UI.toast(esc(err.message), 5000); });
@@ -126,6 +162,19 @@
         return;
       }
 
+      if (form.matches('[data-billing]')) {
+        var bc = form.closest('[data-rid]');
+        var bf = form.elements;
+        var price = parseFloat(String(bf.price.value).replace(',', '.'));
+        if (!isFinite(price) || price < 0) return UI.toast('Prix invalide');
+        T.admin.saveBilling({
+          restaurant_id: bc.dataset.rid, plan: bf.plan.value.trim() || 'Standard', monthly_price: price,
+          status: bf.status.value, next_billing: bf.next.value || null, notes: bf.notes.value.trim()
+        }).then(function () { UI.toast('Abonnement enregistré'); return render(); })
+          .catch(function (err) { UI.toast(esc(err.message), 5000); });
+        return;
+      }
+
       if (form.matches('[data-add-member]')) {
         var card = form.closest('[data-rid]');
         var email = form.elements.email.value.trim();
@@ -142,6 +191,13 @@
       var card = e.target.closest('[data-rid]');
       if (!card) return;
       var r = restaurants.filter(function (x) { return x.id === card.dataset.rid; })[0];
+
+      if (e.target.closest('[data-seed]')) {
+        if (!confirm('Générer 30 jours de commandes fictives pour « ' + r.info.name + ' » ? Utile pour présenter les statistiques ; elles sont supprimables depuis l’onglet Statistiques du dashboard.')) return;
+        T.admin.seedDemo(r.id, 30).then(function (n) { UI.toast(n + ' commandes de démo générées pour <strong>' + esc(r.info.name) + '</strong>'); })
+          .catch(function (err) { UI.toast(esc(err.message), 5000); });
+        return;
+      }
 
       if (e.target.closest('[data-copy-links]')) {
         var text = nfcLink(r);

@@ -50,21 +50,31 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 
 ## Fonctionnalités
 
-**Client** (`menu.html?table=X`)
-- En-tête avec le nom et le logo du restaurant, et un badge « Table X » lu dans l’URL. Si aucune table n’est détectée, le numéro est demandé au paiement.
-- Carte par catégories (Entrées, Plats, Desserts, Boissons), filtres rapides (Végétarien, Sans gluten, Signature) et recherche sans tenir compte des accents.
-- Fiche produit en bottom sheet : photo, description, allergènes et options (cuisson, accompagnement, suppléments payants). Les groupes obligatoires sont vérifiés avant l’ajout.
-- Panier : quantités, note par plat (« Sans oignon »), message global pour la cuisine, total recalculé en direct.
-- Paiement : Apple Pay / Google Pay, carte bancaire (Stripe) ou paiement sur place.
-- Suivi en temps réel : *Commande envoyée en cuisine → En préparation → Prête → Servie*, avec vibration et toast à chaque étape.
+**Client** (plaque NFC → `menu.html?r=<restaurant>`)
+- Numéro de table saisi à l'arrivée et vérifié, modifiable via le badge.
+- Carte par catégories personnalisables, filtres rapides, recherche, photos.
+- Fiche produit : options et suppléments, **14 allergènes réglementaires**, suggestions « Parfait avec ».
+- Panier avec notes pour la cuisine, commande payée à table ; paiement en ligne prévu en option.
+- **Bouton Service** : « Appeler un serveur » ou « Demander l'addition ».
+- Suivi en temps réel (Envoyée → En préparation → Prête → Servie), puis invitation à laisser un **avis Google**.
+- Bandeau « Commandes en pause » quand le restaurant suspend les commandes.
 
 **Restaurateur** (`kitchen.html`)
-- Tickets en temps réel en vue Kanban par statut ou regroupés par numéro de table.
-- Alerte sonore (Web Audio, aucun fichier requis), toast, ticket qui clignote et compteur dans l’onglet du navigateur à chaque nouvelle commande.
-- Boutons d’état « En préparation », « Prête », « Servie » et « Terminée », avec chronomètre (orange au-delà de 10 min, rouge au-delà de 20 min).
-- Filtre par poste (Cuisine / Bar), badge payé / à encaisser, historique avec réouverture d’une commande.
-- Éditeur de menu : prix modifiable en ligne, interrupteur de rupture de stock (le produit est masqué côté client), ajout ou modification d’un plat avec ses options, paramètres de l’établissement.
-- Bouton « Simuler une commande » pour les démos.
+- Commandes en temps réel, par statut ou par table, filtre Cuisine / Bar.
+- Appels des tables mis en évidence (« Table 4 demande l'addition »), avec sonnerie.
+- **Encaisser et clôturer une table** en un clic, **impression du ticket** (80 mm).
+- Fiabilité de la tablette : écran maintenu allumé, rappel sonore tant qu'une commande ou un appel n'est pas traité, bandeau « connexion perdue ».
+- Bouton **Pause** pour suspendre les commandes en ligne lors d'un coup de feu.
+- Carte : catégories (ajout, renommage, ordre), photos envoyées depuis le téléphone, allergènes, suggestions, prix et ruptures en direct.
+- **Statistiques** : chiffre d'affaires par jour, affluence par heure, plats les plus vendus, panier moyen, temps de préparation, part cuisine / bar, export CSV.
+- Rôles : Gérant (tout) / Équipe (commandes uniquement).
+
+**Tapigo** (`admin.html`)
+- Création des restaurants, gestion des accès, lien NFC unique par restaurant.
+- **Abonnements** : formule, prix mensuel, statut (essai, à jour, en retard, résilié), échéance, revenu mensuel total. Aucune commission sur les ventes.
+- Génération de **30 jours de données de démonstration** pour présenter les statistiques (marquées « démo », supprimables).
+
+**Sécurité** : prix recalculés par la base, anti-abus (6 commandes maximum par table toutes les 10 minutes), table inexistante refusée, isolation complète entre restaurants (RLS).
 
 ## Architecture
 
@@ -84,6 +94,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
     ├── ui.js           Bottom sheets, toasts, icônes, son, repli d’image
     ├── menu.js         Logique client
     ├── kitchen.js      Logique restaurateur
+    ├── stats.js        Statistiques (graphiques SVG, export CSV)
     └── admin.js        Logique administration
 ```
 

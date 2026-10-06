@@ -28,7 +28,8 @@
     restaurant: NS + 'restaurant',
     menu: NS + 'menu',
     orders: NS + 'orders',
-    seq: NS + 'seq'
+    seq: NS + 'seq',
+    requests: NS + 'requests'
   };
 
   var memory = {};
@@ -74,6 +75,7 @@
   } else {
     window.addEventListener('storage', function (e) {
       if (e.key === K.orders) notify({ type: 'orders:sync' }, true);
+      if (e.key === K.requests) notify({ type: 'service:updated' }, true);
       if (e.key === K.menu) notify({ type: 'menu:updated' }, true);
       if (e.key === K.restaurant) notify({ type: 'restaurant:updated' }, true);
     });
@@ -171,6 +173,12 @@
     write(K.menu, menu);
     emit('menu:updated', { id: item.id });
     return item;
+  }
+
+  function replaceMenu(menu) {
+    write(K.menu, menu);
+    emit('menu:updated', null);
+    return Promise.resolve();
   }
 
   function deleteItem(id) {
@@ -273,6 +281,111 @@
     if (o) emit('order:updated', o);
   }
 
+  /* ---------------- Appels du personnel (démo) ---------------- */
+  function requestService(kind, table) {
+    var list = read(K.requests, []);
+    var open = list.filter(function (q) { return q.table_label === String(table) && q.kind === kind && !q.done_at; })[0];
+    if (open) return Promise.resolve(open);
+    var q = { id: 'q_' + Date.now().toString(36), table_label: String(table), kind: kind, created_at: new Date().toISOString(), done_at: null };
+    list.push(q);
+    write(K.requests, list);
+    emit('service:created', q);
+    return Promise.resolve(q);
+  }
+
+  function getServiceRequests() {
+    return read(K.requests, []).filter(function (q) { return !q.done_at; });
+  }
+
+  function completeServiceRequest(id) {
+    var list = read(K.requests, []).map(function (q) {
+      if (q.id === id) q.done_at = new Date().toISOString();
+      return q;
+    });
+    write(K.requests, list);
+    emit('service:updated', null);
+  }
+
+  function closeTable(table) {
+    getOrders().forEach(function (o) {
+      if (o.table === String(table) && o.status !== 'terminee') updateOrderStatus(o.id, 'terminee');
+    });
+    read(K.requests, []).forEach(function (q) {
+      if (q.table_label === String(table) && !q.done_at) completeServiceRequest(q.id);
+    });
+    return Promise.resolve();
+  }
+
+  function setOrdersPaused(paused) {
+    var info = getRestaurant();
+    if (paused) info.ordersPaused = true; else delete info.ordersPaused;
+    saveRestaurant(info);
+  }
+
+  function loadStats(days) {
+    var since = Date.now() - days * 24 * 3600 * 1000;
+    return Promise.resolve(getOrders().filter(function (o) { return o.createdAt >= since; }));
+  }
+
+  // En démo, la photo est gardée dans le navigateur (image réduite).
+  function uploadPhoto(file) {
+    return window.TapigoUI.compressImage(file, 640, 0.75).then(function (blob) {
+      return new Promise(function (resolve) {
+        var fr = new FileReader();
+        fr.onload = function () { resolve(fr.result); };
+        fr.readAsDataURL(blob);
+      });
+    });
+  }
+
+  // Commandes passées fictives pour voir les statistiques en démo.
+  function seedDemoOrders(days) {
+    var items = window.Tapigo.getMenu().items.filter(function (i) { return i.available !== false; });
+    if (!items.length) return 0;
+    var orders = getOrders();
+    var seq = read(K.seq, 1040);
+    var tables = getRestaurant().tables || 12;
+    var count = 0;
+    var pick = function (arr) { return arr[Math.floor(Math.random() * arr.length)]; };
+    for (var d = days; d >= 1; d--) {
+      var day = new Date(); day.setDate(day.getDate() - d);
+      var n = 6 + Math.floor(Math.random() * 10) + ([0, 5, 6].indexOf(day.getDay()) >= 0 ? 8 : 0);
+      for (var k = 0; k < n; k++) {
+        var at = new Date(day);
+        if (Math.random() < 0.45) at.setHours(12, 0, 0, 0); else at.setHours(19, 0, 0, 0);
+        at = at.getTime() + Math.random() * 150 * 60000;
+        var lines = [];
+        for (var j = 0, m = 1 + Math.floor(Math.random() * 4); j < m; j++) {
+          var it = pick(items), sel = {};
+          (it.options || []).forEach(function (g) { if (g.required) sel[g.id] = [pick(g.choices).label]; });
+          lines.push(buildLine(it.id, Math.random() < 0.25 ? 2 : 1, sel, ''));
+        }
+        var prep = 8 + Math.floor(Math.random() * 14);
+        orders.push({
+          id: 'demo_' + at.toString(36) + k, number: ++seq, table: String(1 + Math.floor(Math.random() * tables)),
+          lines: lines, note: '', payment: { method: 'onsite', status: 'paid', demo: true },
+          total: Math.round(lines.reduce(function (s, l) { return s + l.unitPrice * l.qty; }, 0) * 100) / 100,
+          status: 'terminee', createdAt: at, seen: true,
+          history: [
+            { status: 'nouvelle', at: at }, { status: 'preparation', at: at + 120000 },
+            { status: 'prete', at: at + prep * 60000 }, { status: 'servie', at: at + (prep + 3) * 60000 },
+            { status: 'terminee', at: at + (prep + 45) * 60000 }
+          ]
+        });
+        count++;
+      }
+    }
+    write(K.seq, seq);
+    write(K.orders, orders);
+    emit('orders:sync', null);
+    return count;
+  }
+
+  function clearDemoOrders() {
+    write(K.orders, getOrders().filter(function (o) { return !(o.payment && o.payment.demo); }));
+    emit('orders:sync', null);
+  }
+
   function resetDemo() {
     Object.keys(K).forEach(function (k) { remove(K[k]); });
     seed();
@@ -286,6 +399,25 @@
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function norm(s) {
+    return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/œ/g, 'oe');
+  }
+
+  // Allergènes d'un plat : liste cochée, sinon détectés dans l'ancien texte libre.
+  function itemAllergens(item) {
+    var all = (DEMO && DEMO.allergens) || [];
+    if (item.allergenList && item.allergenList.length) {
+      return all.filter(function (a) { return item.allergenList.indexOf(a.id) >= 0; });
+    }
+    var text = norm(item.allergens);
+    if (!text) return [];
+    return all.filter(function (a) {
+      var l = norm(a.label);
+      return text.indexOf(l) >= 0 || (a.id === 'oeufs' && /\boeufs?\b/.test(text)) ||
+        (a.id === 'poissons' && /\bpoisson/.test(text)) || (a.id === 'mollusques' && /mollusque/.test(text));
     });
   }
 
@@ -310,6 +442,7 @@
     getItem: getItem,
     saveItem: saveItem,
     deleteItem: deleteItem,
+    replaceMenu: replaceMenu,
     setAvailable: setAvailable,
     buildLine: buildLine,
     getOrders: getOrders,
@@ -318,11 +451,21 @@
     updateOrderStatus: updateOrderStatus,
     markSeen: markSeen,
     resetDemo: resetDemo,
+    requestService: requestService,
+    getServiceRequests: getServiceRequests,
+    completeServiceRequest: completeServiceRequest,
+    closeTable: closeTable,
+    setOrdersPaused: setOrdersPaused,
+    loadStats: loadStats,
+    uploadPhoto: uploadPhoto,
+    seedDemoOrders: seedDemoOrders,
+    clearDemoOrders: clearDemoOrders,
     read: read,
     write: write,
     fmt: fmt,
     esc: esc,
     clock: clock,
+    itemAllergens: itemAllergens,
     minutesSince: minutesSince
   };
 

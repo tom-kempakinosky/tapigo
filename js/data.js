@@ -51,6 +51,24 @@
       gf: 'Sans gluten'
     },
 
+    // Les 14 allergènes à déclaration obligatoire (règlement UE INCO n° 1169/2011).
+    allergens: [
+      { id: 'gluten', label: 'Gluten' },
+      { id: 'crustaces', label: 'Crustacés' },
+      { id: 'oeufs', label: 'Œufs' },
+      { id: 'poissons', label: 'Poissons' },
+      { id: 'arachides', label: 'Arachides' },
+      { id: 'soja', label: 'Soja' },
+      { id: 'lait', label: 'Lait' },
+      { id: 'fruits-a-coque', label: 'Fruits à coque' },
+      { id: 'celeri', label: 'Céleri' },
+      { id: 'moutarde', label: 'Moutarde' },
+      { id: 'sesame', label: 'Sésame' },
+      { id: 'sulfites', label: 'Sulfites' },
+      { id: 'lupin', label: 'Lupin' },
+      { id: 'mollusques', label: 'Mollusques' }
+    ],
+
     items: [
       /* ---------- Entrées ---------- */
       {
@@ -230,4 +248,11 @@
       }
     ]
   };
+
+  // Suggestions « Parfait avec » de la carte de démonstration.
+  var PAIRINGS = {
+    entrecote: ['bordeaux'], burger: ['citronnade'], risotto: ['bordeaux'],
+    burrata: ['spritz'], fondant: ['espresso'], 'tarte-citron': ['espresso'], dorade: ['bordeaux']
+  };
+  window.TAPIGO_DEMO.items.forEach(function (i) { if (PAIRINGS[i.id]) i.pairings = PAIRINGS[i.id]; });
 })();

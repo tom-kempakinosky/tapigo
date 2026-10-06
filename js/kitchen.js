@@ -79,7 +79,9 @@
       }).join('') + '</ul>' +
       (o.note ? '<p class="ticket__note">📝 ' + esc(o.note) + '</p>' : '') +
       '<div class="ticket__foot"><span class="badge ' + (paid ? 'badge--ok' : 'badge--warn') + '">' +
-        (paid ? 'Payé · ' + PAY[o.payment.method] : 'À encaisser') + '</span><strong>' + fmt(o.total) + '</strong></div>' +
+        (paid ? 'Payé · ' + PAY[o.payment.method] : 'À encaisser') + '</span>' +
+        '<button class="link-btn" type="button" data-print title="Imprimer le ticket">🖨 Imprimer</button>' +
+        '<strong>' + fmt(o.total) + '</strong></div>' +
       '<div class="ticket__actions">' + ACTIONS.map(function (a) {
         var i = FLOW.indexOf(a.id);
         var cls = i === cur ? ' is-active' : i === cur + 1 ? ' is-next' : i < cur ? ' is-past' : '';
@@ -106,10 +108,25 @@
     }).join('') + '</div>';
   }
 
+  function requestsHTML() {
+    var list = T.getServiceRequests();
+    if (!list.length) return '';
+    return '<div class="requests" role="region" aria-label="Appels des tables">' + list.map(function (q) {
+      var m = T.minutesSince(Date.parse(q.created_at));
+      return '<div class="request request--' + esc(q.kind) + '">' +
+        '<span class="request__icon" aria-hidden="true">' + (q.kind === 'addition' ? '🧾' : '🙋') + '</span>' +
+        '<span class="request__text"><strong>Table ' + esc(q.table_label) + '</strong> ' +
+          (q.kind === 'addition' ? 'demande l’addition' : 'appelle un serveur') +
+          '<small>il y a ' + m + ' min</small></span>' +
+        '<button class="btn btn--primary btn--sm" type="button" data-request-done="' + esc(q.id) + '">C’est fait</button>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+
   function renderOrders() {
     var all = activeOrders();
     var shown = all.filter(forStation);
-    var html = statsHTML(all) +
+    var html = requestsHTML() + statsHTML(all) +
       '<div class="k-filters">' +
         seg('layout', state.layout, [['status', 'Par statut'], ['table', 'Par table']]) +
         seg('station', state.station, [['all', 'Tout'], ['cuisine', 'Cuisine'], ['bar', 'Bar']]) +
@@ -132,9 +149,13 @@
         ? '<div class="tables-grid">' + keys.map(function (k) {
             var list = tables[k];
             var due = list.filter(function (o) { return o.payment.status !== 'paid'; }).reduce(function (s, o) { return s + o.total; }, 0);
+            var total = list.reduce(function (s, o) { return s + o.total; }, 0);
             return '<section class="table-group"><div class="table-group__head"><h2>Table ' + esc(k) + '</h2>' +
               (due ? '<span class="badge badge--warn">À encaisser ' + fmt(due) + '</span>' : '<span class="badge badge--ok">Réglée</span>') + '</div>' +
-              list.map(ticketHTML).join('') + '</section>';
+              list.map(ticketHTML).join('') +
+              '<div class="table-group__foot"><span>Total de la table <strong>' + fmt(total) + '</strong></span>' +
+              '<button class="btn btn--primary btn--sm" type="button" data-close-table="' + esc(k) + '">Encaisser &amp; clôturer</button></div>' +
+              '</section>';
           }).join('') + '</div>'
         : '<div class="empty"><h3>Service calme</h3><p>Aucune commande en cours. Les nouvelles commandes apparaîtront ici instantanément.</p></div>';
     }
@@ -234,12 +255,16 @@
       '<div class="editor__bar">' +
         '<label class="search">' + I.search + '<input id="menuSearch" type="search" placeholder="Rechercher un produit…" value="' + esc(state.q) + '" aria-label="Rechercher un produit"></label>' +
         '<button class="btn btn--primary" type="button" data-new>' + I.plus.replace('<svg ', '<svg width="16" height="16" ') + ' Ajouter un plat</button>' +
+        '<button class="btn btn--ghost" type="button" data-categories>Catégories</button>' +
         '<button class="btn btn--ghost" type="button" data-settings>Établissement</button>' +
       '</div>' +
       '<p class="eyebrow">' + menu.items.length + ' produits · ' + off + ' en rupture (masqué' + (off > 1 ? 's' : '') + ' côté client)</p>' +
       menu.categories.map(function (c) {
         var list = menu.items.filter(function (i) { return i.category === c.id && (!q || norm(i.name + ' ' + i.description).indexOf(q) >= 0); });
-        if (!list.length) return '';
+        if (!list.length) {
+          return q ? '' : '<section class="editor-cat"><h2>' + esc(c.label) + '</h2><p class="help">Aucun plat dans cette catégorie. ' +
+            '<button class="link-btn" type="button" data-new="' + esc(c.id) + '">Ajouter un plat</button></p></section>';
+        }
         return '<section class="editor-cat"><h2>' + esc(c.label) + '</h2><div class="editor-list">' + list.map(function (i) {
           var on = i.available !== false;
           return '<div class="editor-row' + (on ? '' : ' is-off') + '" data-item="' + esc(i.id) + '">' +
@@ -294,12 +319,14 @@
     '</div>';
   }
 
-  function openItemForm(id) {
+  function openItemForm(id, categoryId) {
     var menu = T.getMenu();
     if (!menu.categories.length) { menu.categories = window.TAPIGO_DEMO.categories; menu.tags = window.TAPIGO_DEMO.tags; }
-    var item = id ? T.getItem(id) : { name: '', description: '', price: '', category: menu.categories[0].id, station: 'cuisine', image: '', emoji: '🍽️', tags: [], allergens: '', available: true, options: [] };
+    var item = id ? T.getItem(id) : { name: '', description: '', price: '', category: categoryId || menu.categories[0].id, station: 'cuisine', image: '', emoji: '🍽️', tags: [], allergens: '', available: true, options: [] };
     if (!item) return;
     var tags = menu.tags || {};
+    var hasAllergen = T.itemAllergens(item).map(function (a) { return a.id; });
+    var others = menu.items.filter(function (i) { return i.id !== item.id; });
 
     UI.openSheet({
       label: id ? 'Modifier un produit' : 'Nouveau produit',
@@ -316,8 +343,22 @@
             '<option value="cuisine"' + (item.station !== 'bar' ? ' selected' : '') + '>Cuisine</option>' +
             '<option value="bar"' + (item.station === 'bar' ? ' selected' : '') + '>Bar</option></select></label>' +
           '<label class="field"><span>Emoji (si pas de photo)</span><input name="emoji" maxlength="4" value="' + esc(item.emoji || '') + '"></label>' +
-          '<label class="field span-2"><span>URL de la photo</span><input name="image" type="url" value="' + esc(item.image || '') + '" placeholder="https://…"></label>' +
-          '<label class="field span-2"><span>Allergènes</span><input name="allergens" value="' + esc(item.allergens || '') + '" placeholder="Gluten, lait…"></label>' +
+          '<div class="field span-2"><span>Photo</span><div class="photo-field">' +
+            '<div class="media photo-field__preview" id="photoPreview" data-emoji="' + esc(item.emoji || '🍽️') + '">' + (item.image ? '<img src="' + esc(item.image) + '" alt="">' : '') + '</div>' +
+            '<div class="photo-field__actions">' +
+              '<label class="btn btn--soft btn--sm">📷 ' + (item.image ? 'Changer la photo' : 'Ajouter une photo') + '<input type="file" accept="image/*" id="photoInput" hidden></label>' +
+              '<button class="link-btn link-btn--danger" type="button" data-remove-photo' + (item.image ? '' : ' hidden') + '>Retirer la photo</button>' +
+              '<small class="help" id="photoHelp">Prise depuis le téléphone ou la galerie, réduite automatiquement.</small>' +
+            '</div></div>' +
+            '<input name="image" type="url" value="' + esc(item.image || '') + '" placeholder="ou collez l’adresse d’une image (https://…)" style="margin-top:8px"></div>' +
+          '<div class="field span-2"><span>Allergènes (14 allergènes réglementaires)</span><div class="check-row check-row--sm">' +
+            window.TAPIGO_DEMO.allergens.map(function (a) {
+              return '<label><input type="checkbox" name="allergen" value="' + a.id + '"' + (hasAllergen.indexOf(a.id) >= 0 ? ' checked' : '') + '> ' + esc(a.label) + '</label>';
+            }).join('') + '</div></div>' +
+          (others.length ? '<div class="field span-2"><span>Suggérer avec (« Parfait avec », 3 maximum)</span><div class="check-row check-row--sm">' +
+            others.map(function (o) {
+              return '<label><input type="checkbox" name="pairing" value="' + esc(o.id) + '"' + ((item.pairings || []).indexOf(o.id) >= 0 ? ' checked' : '') + '> ' + esc(o.name) + '</label>';
+            }).join('') + '</div></div>' : '') +
           '<div class="field span-2"><span>Étiquettes</span><div class="check-row">' + Object.keys(tags).map(function (k) {
             return '<label><input type="checkbox" name="tags" value="' + esc(k) + '"' + ((item.tags || []).indexOf(k) >= 0 ? ' checked' : '') + '> ' + esc(tags[k]) + '</label>';
           }).join('') + '</div></div>' +
@@ -331,7 +372,36 @@
         '<button class="btn btn--primary" type="submit" form="itemForm">' + (id ? 'Enregistrer' : 'Ajouter au menu') + '</button>',
       onMount: function (sheet) {
         var form = $('#itemForm', sheet);
+        var preview = $('#photoPreview', sheet);
+        var setPhoto = function (url) {
+          form.elements.image.value = url || '';
+          preview.classList.remove('is-broken');
+          preview.innerHTML = url ? '<img src="' + esc(url) + '" alt="">' : '';
+          sheet.querySelector('[data-remove-photo]').hidden = !url;
+        };
+        $('#photoInput', sheet).addEventListener('change', function (e) {
+          var file = e.target.files && e.target.files[0];
+          if (!file) return;
+          var help = $('#photoHelp', sheet);
+          help.textContent = 'Envoi de la photo…';
+          T.uploadPhoto(file).then(function (url) {
+            setPhoto(url);
+            help.textContent = 'Photo ajoutée ✓';
+          }).catch(function (err) {
+            help.textContent = err.message;
+            UI.toast(esc(err.message), 5000);
+          });
+          e.target.value = '';
+        });
+        form.elements.image.addEventListener('change', function () { setPhoto(form.elements.image.value.trim()); });
+        form.addEventListener('change', function (e) {
+          if (e.target.name === 'pairing' && form.querySelectorAll('[name="pairing"]:checked').length > 3) {
+            e.target.checked = false;
+            UI.toast('3 suggestions maximum');
+          }
+        });
         sheet.addEventListener('click', function (e) {
+          if (e.target.closest('[data-remove-photo]')) setPhoto('');
           if (e.target.closest('[data-add-group]')) {
             $('#groups', sheet).insertAdjacentHTML('beforeend', groupEditHTML({ type: 'single', required: false, choices: [] }));
             $('#groups .optgroup-edit:last-child input', sheet).focus();
@@ -340,6 +410,9 @@
           if (rm) rm.closest('.optgroup-edit').remove();
           if (e.target.closest('[data-cancel]')) UI.closeSheet();
         });
+        var checkedValues = function (name) {
+          return [].slice.call(form.querySelectorAll('[name="' + name + '"]:checked')).map(function (i) { return i.value; });
+        };
         form.addEventListener('submit', function (e) {
           e.preventDefault();
           var f = form.elements;
@@ -369,8 +442,11 @@
             station: f.station.value,
             emoji: f.emoji.value.trim() || '🍽️',
             image: f.image.value.trim(),
-            allergens: f.allergens.value.trim(),
-            tags: [].slice.call(form.querySelectorAll('[name="tags"]:checked')).map(function (i) { return i.value; }),
+            allergenList: checkedValues('allergen'),
+            allergens: window.TAPIGO_DEMO.allergens.filter(function (a) { return checkedValues('allergen').indexOf(a.id) >= 0; })
+              .map(function (a) { return a.label; }).join(', '),
+            pairings: checkedValues('pairing'),
+            tags: checkedValues('tags'),
             available: f.available.checked,
             options: options
           });
@@ -399,6 +475,9 @@
           '<label class="field span-2"><span>Accroche</span><input name="tagline" maxlength="80" value="' + esc(r.tagline || '') + '"></label>' +
           '<label class="field"><span>Nombre de tables</span><input name="tables" inputmode="numeric" value="' + (r.tables || 12) + '"></label>' +
           '<label class="field"><span>Lettre du logo</span><input name="logoLetter" maxlength="1" value="' + esc(r.logoLetter || r.name.charAt(0)) + '"></label>' +
+          '<label class="field span-2"><span>Lien d’avis Google (proposé au client après son repas)</span>' +
+            '<input name="reviewUrl" type="url" value="' + esc(r.reviewUrl || '') + '" placeholder="https://g.page/r/…/review">' +
+            '<small class="help">Google Business Profile → « Demander des avis » → copier le lien.</small></label>' +
           '<label class="field span-2"><span>Lien à écrire sur toutes les plaques NFC (le client indique sa table)</span>' +
             '<input id="nfcLinks" readonly value="' + esc(nfcLink()) + '" style="font-size:13px;font-family:ui-monospace,Menlo,monospace">' +
             '<button class="btn btn--soft btn--sm" type="button" id="copyLinks" style="justify-self:start">Copier le lien</button></label>' +
@@ -414,17 +493,183 @@
         $('#settingsForm', sheet).addEventListener('submit', function (e) {
           e.preventDefault();
           var f = e.target.elements;
-          T.saveRestaurant({
-            id: r.id,
+          var review = f.reviewUrl.value.trim();
+          if (review && !/^https:\/\//i.test(review)) return UI.toast('Le lien d’avis doit commencer par https://');
+          var info = Object.assign({}, r, {
             name: f.name.value.trim() || r.name,
             tagline: f.tagline.value.trim(),
             tables: Math.max(1, Math.min(200, parseInt(f.tables.value, 10) || r.tables || 12)),
-            logoLetter: f.logoLetter.value.trim()
+            logoLetter: f.logoLetter.value.trim(),
+            reviewUrl: review
           });
+          T.saveRestaurant(info);
           UI.closeSheet();
           UI.toast('Établissement mis à jour');
         });
       }
+    });
+  }
+
+  /* ======================================================================
+     Impression du ticket (imprimante thermique 80 mm ou classique)
+     ====================================================================== */
+  function printTicket(id) {
+    var o = T.getOrder(id);
+    if (!o) return;
+    var r = T.getRestaurant();
+    $('#printArea').innerHTML = '<div class="print-ticket">' +
+      '<p class="pt-center"><strong>' + esc(r.name) + '</strong></p>' +
+      '<p class="pt-big">TABLE ' + esc(o.table) + '</p>' +
+      '<p class="pt-center">Commande n° ' + o.number + ' · ' + T.clock(o.createdAt) + '</p><hr>' +
+      o.lines.map(function (l) {
+        return '<div class="pt-line"><strong>' + l.qty + ' × ' + esc(l.name) + '</strong>' +
+          l.options.map(function (op) { return '<div>  ' + esc(op.group) + ' : ' + esc(op.values.join(', ')) + '</div>'; }).join('') +
+          (l.note ? '<div>  ⚠ ' + esc(l.note) + '</div>' : '') + '</div>';
+      }).join('') +
+      (o.note ? '<hr><p><strong>Note :</strong> ' + esc(o.note) + '</p>' : '') +
+      '<hr><p class="pt-total"><span>Total</span><span>' + fmt(o.total) + '</span></p>' +
+      '<p class="pt-center">' + (o.payment.status === 'paid' ? 'Payé' : 'À encaisser') + '</p></div>';
+    window.print();
+  }
+
+  /* ======================================================================
+     Appels des tables, pause, fiabilité de la tablette
+     ====================================================================== */
+  function announceService(q) {
+    if (state.sound) UI.chime();
+    UI.vibrate([80, 60, 80]);
+    UI.toast((q.kind === 'addition' ? '🧾' : '🙋') + ' <strong>Table ' + esc(q.table_label) + '</strong> ' +
+      (q.kind === 'addition' ? 'demande l’addition' : 'appelle un serveur'), 6000);
+  }
+
+  function canManage() {
+    if (!LIVE) return true;
+    var cur = T.currentRestaurant();
+    return cur && cur.role !== 'equipe';
+  }
+
+  function renderPause() {
+    var b = $('#pauseBtn');
+    var paused = !!T.getRestaurant().ordersPaused;
+    b.hidden = !canManage();
+    b.setAttribute('aria-pressed', String(paused));
+    b.classList.toggle('is-paused', paused);
+    b.textContent = paused ? '⏸ Commandes en pause' : 'Pause';
+    b.title = paused ? 'Reprendre les commandes en ligne' : 'Suspendre les commandes en ligne (coup de feu, fermeture)';
+  }
+
+  // Rappel sonore tant qu'une commande ou un appel n'a pas été traité.
+  function remind() {
+    if (!state.sound || document.hidden) return;
+    var unseen = T.getOrders().some(function (o) { return !o.seen && o.status !== 'terminee'; });
+    if (unseen || T.getServiceRequests().length) UI.chime();
+  }
+
+  // Empêche la tablette de se mettre en veille pendant le service.
+  var wakeLock = null;
+  function keepAwake() {
+    if (!('wakeLock' in navigator) || document.hidden) return;
+    navigator.wakeLock.request('screen').then(function (l) { wakeLock = l; }).catch(function () { /* refusé */ });
+  }
+
+  function renderOnline() { $('#offlineBanner').hidden = navigator.onLine !== false; }
+
+  /* ======================================================================
+     Catégories de la carte
+     ====================================================================== */
+  function openCategories() {
+    var menu = T.getMenu();
+    if (!menu.categories.length) menu.categories = window.TAPIGO_DEMO.categories.slice();
+    var cats = menu.categories.map(function (c) { return { id: c.id, label: c.label }; });
+    var count = function (id) { return menu.items.filter(function (i) { return i.category === id; }).length; };
+
+    var rowsHTML = function () {
+      return cats.map(function (c, i) {
+        return '<div class="cat-row" data-i="' + i + '">' +
+          '<input class="input" value="' + esc(c.label) + '" data-label aria-label="Nom de la catégorie" maxlength="30">' +
+          '<span class="help">' + count(c.id) + ' plat' + (count(c.id) > 1 ? 's' : '') + '</span>' +
+          '<button class="icon-btn" type="button" data-move="-1" aria-label="Monter"' + (i ? '' : ' disabled') + '>↑</button>' +
+          '<button class="icon-btn" type="button" data-move="1" aria-label="Descendre"' + (i < cats.length - 1 ? '' : ' disabled') + '>↓</button>' +
+          '<button class="icon-btn" type="button" data-del aria-label="Supprimer">' + I.trash + '</button>' +
+        '</div>';
+      }).join('');
+    };
+
+    UI.openSheet({
+      label: 'Catégories',
+      head: '<p class="eyebrow">Carte</p><h2>Catégories</h2>',
+      body:
+        '<p class="product-desc">L’ordre ici est celui de la carte côté client (ex. Apéritifs, Pizzas, Vins…).</p>' +
+        '<div id="catRows" style="display:grid;gap:8px"></div>' +
+        '<form id="catAdd" style="display:flex;gap:8px"><input class="input" name="label" placeholder="Nouvelle catégorie" maxlength="30">' +
+        '<button class="btn btn--soft" type="submit">Ajouter</button></form>',
+      footer: '<button class="btn btn--primary" type="button" id="catSave">Enregistrer</button>',
+      onMount: function (sheet) {
+        var box = $('#catRows', sheet);
+        var paint = function () { box.innerHTML = rowsHTML(); };
+        var syncLabels = function () {
+          box.querySelectorAll('.cat-row').forEach(function (row) { cats[+row.dataset.i].label = row.querySelector('[data-label]').value; });
+        };
+        paint();
+        box.addEventListener('click', function (e) {
+          var row = e.target.closest('.cat-row');
+          if (!row) return;
+          syncLabels();
+          var i = +row.dataset.i;
+          var mv = e.target.closest('[data-move]');
+          if (mv) {
+            var j = i + Number(mv.dataset.move);
+            var tmp = cats[i]; cats[i] = cats[j]; cats[j] = tmp;
+            return paint();
+          }
+          if (e.target.closest('[data-del]')) {
+            if (count(cats[i].id)) return UI.toast('Déplacez ou supprimez d’abord les plats de « ' + esc(cats[i].label) + ' »', 4000);
+            if (cats.length === 1) return UI.toast('La carte doit garder au moins une catégorie');
+            cats.splice(i, 1);
+            paint();
+          }
+        });
+        $('#catAdd', sheet).addEventListener('submit', function (e) {
+          e.preventDefault();
+          syncLabels();
+          var label = e.target.elements.label.value.trim();
+          if (!label) return;
+          var base = T._slug(label), id = base, n = 2;
+          while (cats.some(function (c) { return c.id === id; })) id = base + '-' + n++;
+          cats.push({ id: id, label: label });
+          e.target.reset();
+          paint();
+        });
+        $('#catSave', sheet).addEventListener('click', function () {
+          syncLabels();
+          if (cats.some(function (c) { return !c.label.trim(); })) return UI.toast('Chaque catégorie doit avoir un nom');
+          menu.categories = cats.map(function (c) { return { id: c.id, label: c.label.trim() }; });
+          T.replaceMenu(menu);
+          UI.closeSheet();
+          UI.toast('Catégories enregistrées');
+        });
+      }
+    });
+  }
+
+  /* ======================================================================
+     Statistiques
+     ====================================================================== */
+  var statsDays = 30;
+  function renderStats() {
+    var cur = LIVE ? T.currentRestaurant() : null;
+    window.TapigoStats.render($('#statsView'), {
+      days: statsDays,
+      load: function (days) { statsDays = days; return T.loadStats(days); },
+      // Données fictives : réservé à l'équipe Tapigo (ou au mode démo) pour présenter l'outil.
+      demoTools: !LIVE || (cur && cur.role === 'admin'),
+      seed: function () {
+        return LIVE ? T.admin.seedDemo(cur.id, 30) : Promise.resolve(T.seedDemoOrders(30));
+      },
+      clear: function () {
+        return LIVE ? T.admin.clearDemo(cur.id) : Promise.resolve(T.clearDemoOrders());
+      },
+      restaurantName: T.getRestaurant().name
     });
   }
 
@@ -458,7 +703,10 @@
     document.querySelectorAll('.k-tab').forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.view === v)); });
     $('#ordersView').hidden = v !== 'orders';
     $('#menuView').hidden = v !== 'menu';
-    if (v === 'orders') renderOrders(); else renderMenuEditor();
+    $('#statsView').hidden = v !== 'stats';
+    if (v === 'orders') renderOrders();
+    else if (v === 'menu') renderMenuEditor();
+    else renderStats();
   }
 
   function bind() {
@@ -470,6 +718,20 @@
     });
     $('#soundBtn').addEventListener('click', function () { setSound(!state.sound); });
     $('#simulateBtn').addEventListener('click', simulateOrder);
+    $('#pauseBtn').addEventListener('click', function () {
+      var paused = !T.getRestaurant().ordersPaused;
+      if (paused && !confirm('Suspendre les commandes en ligne ? Les clients verront « Commandes en pause » jusqu’à la reprise.')) return;
+      T.setOrdersPaused(paused);
+      renderPause();
+      UI.toast(paused ? '⏸ Commandes en ligne suspendues' : '▶ Commandes en ligne reprises');
+    });
+
+    setInterval(remind, 30000);
+    keepAwake();
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) keepAwake(); });
+    window.addEventListener('online', function () { renderOnline(); UI.toast('Connexion rétablie'); });
+    window.addEventListener('offline', renderOnline);
+    renderOnline();
 
     // Les navigateurs exigent un geste utilisateur avant de jouer un son.
     document.addEventListener('pointerdown', function unlock() {
@@ -483,9 +745,19 @@
       if ((t = e.target.closest('[data-station]'))) { state.station = t.dataset.station; savePrefs(); return renderOrders(); }
       if (e.target.closest('[data-enable-sound]')) return setSound(true);
       if ((t = e.target.closest('[data-reopen]'))) return T.updateOrderStatus(t.dataset.reopen, 'servie');
+      if ((t = e.target.closest('[data-request-done]'))) { T.completeServiceRequest(t.dataset.requestDone); return renderOrders(); }
+      if ((t = e.target.closest('[data-close-table]'))) {
+        var tb = t.dataset.closeTable;
+        if (confirm('Toute la table ' + tb + ' est encaissée ? Ses commandes passent en « Terminée ».')) {
+          T.closeTable(tb);
+          UI.toast('Table <strong>' + esc(tb) + '</strong> clôturée');
+        }
+        return;
+      }
 
       var ticket = e.target.closest('[data-order]');
       if (!ticket) return;
+      if (e.target.closest('[data-print]')) return printTicket(ticket.dataset.order);
       var btn = e.target.closest('.st-btn');
       if (btn && !btn.classList.contains('is-active')) {
         var o = T.updateOrderStatus(ticket.dataset.order, btn.dataset.status);
@@ -527,7 +799,9 @@
         T.replaceMenu({ categories: d.categories, tags: d.tags, items: d.items });
         return UI.toast('Carte de démonstration importée : adaptez-la à votre restaurant');
       }
-      if (e.target.closest('[data-new]')) return openItemForm(null);
+      var nb = e.target.closest('[data-new]');
+      if (nb) return openItemForm(null, nb.dataset.new || null);
+      if (e.target.closest('[data-categories]')) return openCategories();
       if (e.target.closest('[data-settings]')) return openSettings();
       if (e.target.closest('[data-reset]')) {
         if (confirm('Réinitialiser le menu et les commandes de démonstration ?')) { T.resetDemo(); UI.toast('Données de démo restaurées'); }
@@ -551,7 +825,9 @@
       if (/^order:|^orders:|^demo:/.test(msg.type) && state.view === 'orders') renderOrders();
       if (/^order:|^orders:/.test(msg.type)) updateBadges();
       if ((msg.type === 'menu:updated' || msg.type === 'demo:reset') && state.view === 'menu') renderMenuEditor();
-      if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') renderBrand();
+      if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') { renderBrand(); renderPause(); }
+      if (msg.type === 'service:created') announceService(msg.payload);
+      if (/^service:/.test(msg.type) && state.view === 'orders') renderOrders();
       if (msg.type === 'error') UI.toast('⚠ ' + esc(msg.payload.message), 5000);
     });
 
@@ -572,6 +848,7 @@
       var cur = T.currentRestaurant();
       // L'équipe ne gère que les commandes.
       document.querySelector('.k-tab[data-view="menu"]').hidden = cur.role === 'equipe';
+      document.querySelector('.k-tab[data-view="stats"]').hidden = cur.role === 'equipe';
       var sub = document.querySelector('.k-brand p');
       sub.textContent = ROLE_LABEL[cur.role] + ' · Cuisine & Bar';
       if (myRestaurants.length > 1) {
@@ -585,6 +862,7 @@
     }
     renderBrand();
     renderSound();
+    renderPause();
     bind();
     setView('orders');
     tickTimers();

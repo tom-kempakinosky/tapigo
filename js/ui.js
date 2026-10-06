@@ -183,6 +183,29 @@
 
   function vibrate(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
 
+  /* ---------------- Réduction des photos avant envoi ---------------- */
+  // Redimensionne (côté le plus long = maxSize) et convertit en JPEG.
+  function compressImage(file, maxSize, quality) {
+    return new Promise(function (resolve, reject) {
+      if (!file || !/^image\//.test(file.type)) return reject(new Error('Choisissez une image (JPEG, PNG…)'));
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var ratio = Math.min(1, maxSize / Math.max(img.width, img.height));
+        var canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * ratio);
+        canvas.height = Math.round(img.height * ratio);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        canvas.toBlob(function (blob) {
+          if (blob) resolve(blob); else reject(new Error('Image illisible'));
+        }, 'image/jpeg', quality || 0.82);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Image illisible')); };
+      img.src = url;
+    });
+  }
+
   /* ---------------- Mon compte (mode en ligne) ---------------- */
   // opts : { onSwitch: fn | null, onLogout: fn }
   function openAccount(opts) {
@@ -231,6 +254,7 @@
 
   window.TapigoUI = {
     openAccount: openAccount,
+    compressImage: compressImage,
     ICONS: ICONS,
     media: media,
     toast: toast,

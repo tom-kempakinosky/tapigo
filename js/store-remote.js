@@ -29,7 +29,7 @@
   var emit = T._emit;
   var sb = null;
   var current = null; // { id, slug, role }
-  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [] };
+  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [] };
   var pendingMenuWrites = 0;
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
@@ -337,6 +337,94 @@
     }
   };
 
+  /* ---------------- Appels du personnel ---------------- */
+  // Client : « Appeler le serveur » / « Demander l'addition ».
+  T.requestService = function (kind, table) {
+    return sb.rpc('request_service', { p_restaurant: current.slug, p_table: String(table || ''), p_kind: kind })
+      .then(function (r) { if (r.error) throw new Error(r.error.message); return r.data; });
+  };
+
+  T.getServiceRequests = function () {
+    return clone(cache.requests.filter(function (q) { return !q.done_at; }));
+  };
+
+  T.completeServiceRequest = function (id) {
+    cache.requests = cache.requests.filter(function (q) { return q.id !== id; });
+    emit('service:updated', null);
+    sb.from('service_requests').update({ done_at: new Date().toISOString() }).eq('id', id)
+      .then(function (r) { if (r.error) fail(r.error); });
+  };
+
+  function loadRequests() {
+    var since = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+    return sb.from('service_requests').select('*').eq('restaurant_id', current.id)
+      .is('done_at', null).gte('created_at', since).order('created_at', { ascending: true })
+      .then(function (r) {
+        if (r.error) throw r.error;
+        cache.requests = r.data || [];
+        emit('service:updated', null);
+      });
+  }
+
+  // Équipe : tout est encaissé pour la table.
+  T.closeTable = function (table) {
+    cache.orders.forEach(function (o) {
+      if (o.table === String(table) && o.status !== 'terminee') {
+        o.status = 'terminee'; o.seen = true; o.payment.status = 'paid';
+        o.history.push({ status: 'terminee', at: Date.now() });
+      }
+    });
+    cache.requests = cache.requests.filter(function (q) { return q.table_label !== String(table); });
+    emit('orders:sync', null);
+    emit('service:updated', null);
+    return sb.rpc('close_table', { p_restaurant: current.id, p_table: String(table) }).then(function (r) {
+      if (r.error) { fail(r.error); loadOrders(); }
+      return r.data;
+    });
+  };
+
+  T.setOrdersPaused = function (paused) {
+    var info = clone(cache.info);
+    if (paused) info.ordersPaused = true; else delete info.ordersPaused;
+    T.saveRestaurant(info);
+  };
+
+  /* ---------------- Statistiques ---------------- */
+  // Toutes les commandes des `days` derniers jours (par pages de 1000).
+  T.loadStats = function (days) {
+    var since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+    var out = [];
+    function page(from) {
+      return sb.from('orders').select('id, number, table_label, lines, total, status, history, payment, created_at')
+        .eq('restaurant_id', current.id).gte('created_at', since)
+        .order('created_at', { ascending: true }).range(from, from + 999)
+        .then(function (r) {
+          if (r.error) throw r.error;
+          out = out.concat(r.data.map(fromRow));
+          return r.data.length === 1000 && out.length < 20000 ? page(from + 1000) : out;
+        });
+    }
+    return page(0);
+  };
+
+  /* ---------------- Photos ---------------- */
+  T.uploadPhoto = function (file) {
+    return window.TapigoUI.compressImage(file, 1200, 0.82).then(function (blob) {
+      var path = current.id + '/' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) + '.jpg';
+      return sb.storage.from('menu-photos').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '31536000' })
+        .then(function (r) {
+          if (r.error) {
+            throw new Error(/row-level security|unauthorized|403/i.test(r.error.message)
+              ? 'Envoi refusé : seul le gérant peut ajouter des photos.'
+              : /bucket not found/i.test(r.error.message)
+                ? 'Le stockage des photos n’est pas encore activé (relancez supabase/schema.sql).'
+                : r.error.message);
+          }
+          return sb.storage.from('menu-photos').getPublicUrl(path).data.publicUrl;
+        });
+    });
+  };
+
   /* ---------------- Espace équipe ---------------- */
   var staffStarted = false;
 
@@ -382,9 +470,23 @@
           if (status === 'SUBSCRIBED') loadOrders().catch(fail);
         });
 
+      sb.channel('tapigo-requests-' + current.id)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'service_requests', filter: 'restaurant_id=eq.' + current.id }, function (p) {
+          if (p.eventType === 'INSERT') {
+            if (!cache.requests.some(function (q) { return q.id === p.new.id; })) cache.requests.push(p.new);
+            emit('service:created', clone(p.new));
+          } else if (p.eventType === 'UPDATE' && p.new.done_at) {
+            cache.requests = cache.requests.filter(function (q) { return q.id !== p.new.id; });
+            emit('service:updated', null);
+          }
+        })
+        .subscribe(function (status) { if (status === 'SUBSCRIBED') loadRequests().catch(fail); });
+
       // Filet de sécurité si l'écran s'est mis en veille.
-      document.addEventListener('visibilitychange', function () { if (!document.hidden) loadOrders().catch(fail); });
-      setInterval(function () { loadOrders().catch(fail); }, 60000);
+      var resync = function () { loadOrders().catch(fail); loadRequests().catch(fail); };
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) resync(); });
+      window.addEventListener('online', resync);
+      setInterval(resync, 60000);
     });
   };
 
@@ -417,7 +519,24 @@
     setActive: function (id, active) { return rpc('admin_set_active', { p_restaurant: id, p_active: active }); },
     listMembers: function (id) { return rpc('admin_list_members', { p_restaurant: id }); },
     addMember: function (id, email, role) { return rpc('admin_add_member', { p_restaurant: id, p_email: email, p_role: role }); },
-    removeMember: function (id, userId) { return rpc('admin_remove_member', { p_restaurant: id, p_user: userId }); }
+    removeMember: function (id, userId) { return rpc('admin_remove_member', { p_restaurant: id, p_user: userId }); },
+    // { restaurant_id: { plan, monthly_price, status, next_billing, notes } }
+    listBilling: function () {
+      return sb.from('restaurant_billing').select('*').then(function (r) {
+        if (r.error) throw r.error;
+        var map = {};
+        (r.data || []).forEach(function (b) { map[b.restaurant_id] = b; });
+        return map;
+      });
+    },
+    saveBilling: function (row) {
+      row.updated_at = new Date().toISOString();
+      return sb.from('restaurant_billing').upsert(row).select('restaurant_id').then(function (r) {
+        if (r.error) throw r.error;
+      });
+    },
+    seedDemo: function (id, days) { return rpc('admin_seed_demo_orders', { p_restaurant: id, p_days: days || 30 }); },
+    clearDemo: function (id) { return rpc('admin_clear_demo_orders', { p_restaurant: id }); }
   };
 
   /* ---------------- Démarrage ---------------- */

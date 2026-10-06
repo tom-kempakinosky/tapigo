@@ -186,6 +186,7 @@ as $$
 declare
   v_rid     uuid;
   v_menu    jsonb;
+  v_info    jsonb;
   v_req     jsonb;
   v_item    jsonb;
   v_group   jsonb;
@@ -201,17 +202,35 @@ declare
   v_number  int;
   v_order   public.orders;
 begin
-  select id, menu into v_rid, v_menu from public.restaurants where slug = p_restaurant and active;
+  select id, menu, info into v_rid, v_menu, v_info from public.restaurants where slug = p_restaurant and active;
   if v_rid is null then
     raise exception 'Restaurant introuvable';
   end if;
   if v_menu is null then
     raise exception 'La carte n''est pas encore disponible';
   end if;
+  if coalesce((v_info ->> 'ordersPaused')::boolean, false) then
+    raise exception 'Les commandes sont momentanément en pause. Adressez-vous au serveur.';
+  end if;
 
   p_table := left(regexp_replace(coalesce(p_table, ''), '[^0-9A-Za-z-]', '', 'g'), 6);
   if p_table = '' then
     raise exception 'Numéro de table manquant';
+  end if;
+  if p_table ~ '^[0-9]+$'
+     and (p_table::int < 1 or p_table::int > coalesce(nullif(v_info ->> 'tables', '')::int, 200)) then
+    raise exception 'La table % n''existe pas dans ce restaurant', p_table;
+  end if;
+
+  -- Anti-abus : une table ne peut pas envoyer des dizaines de commandes.
+  if (select count(*) from public.orders
+      where restaurant_id = v_rid and table_label = p_table
+        and created_at > now() - interval '10 minutes') >= 6 then
+    raise exception 'Trop de commandes pour cette table. Patientez quelques minutes ou appelez le serveur.';
+  end if;
+  if (select count(*) from public.orders
+      where restaurant_id = v_rid and created_at > now() - interval '1 minute') >= 40 then
+    raise exception 'Le service est très chargé, réessayez dans un instant.';
   end if;
 
   if jsonb_typeof(p_items) is distinct from 'array'
@@ -427,6 +446,230 @@ begin
 end;
 $$;
 
+
+-- ---------- Appels du personnel (serveur, addition) ----------
+create table if not exists public.service_requests (
+  id            uuid primary key default gen_random_uuid(),
+  restaurant_id uuid not null references public.restaurants (id) on delete cascade,
+  table_label   text not null,
+  kind          text not null check (kind in ('serveur', 'addition')),
+  created_at    timestamptz not null default now(),
+  done_at       timestamptz
+);
+create index if not exists service_requests_restaurant_idx on public.service_requests (restaurant_id, created_at desc);
+alter table public.service_requests enable row level security;
+
+drop policy if exists "Appels visibles par l'équipe du restaurant" on public.service_requests;
+create policy "Appels visibles par l'équipe du restaurant" on public.service_requests
+  for select using (public.member_role(restaurant_id) is not null);
+drop policy if exists "Appels traités par l'équipe du restaurant" on public.service_requests;
+create policy "Appels traités par l'équipe du restaurant" on public.service_requests
+  for update using (public.member_role(restaurant_id) is not null)
+  with check (public.member_role(restaurant_id) is not null);
+revoke insert, update, delete on public.service_requests from anon, authenticated;
+grant select on public.service_requests to authenticated;
+grant update (done_at) on public.service_requests to authenticated;
+
+create or replace function public.request_service(p_restaurant text, p_table text, p_kind text)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_rid  uuid;
+  v_info jsonb;
+  v_row  public.service_requests;
+begin
+  select id, info into v_rid, v_info from public.restaurants where slug = p_restaurant and active;
+  if v_rid is null then raise exception 'Restaurant introuvable'; end if;
+  if p_kind not in ('serveur', 'addition') then raise exception 'Demande invalide'; end if;
+  p_table := left(regexp_replace(coalesce(p_table, ''), '[^0-9A-Za-z-]', '', 'g'), 6);
+  if p_table = '' then raise exception 'Indiquez votre numéro de table'; end if;
+  if p_table ~ '^[0-9]+$'
+     and (p_table::int < 1 or p_table::int > coalesce(nullif(v_info ->> 'tables', '')::int, 200)) then
+    raise exception 'La table % n''existe pas dans ce restaurant', p_table;
+  end if;
+
+  -- Même demande déjà en attente : on ne la duplique pas.
+  select * into v_row from public.service_requests
+  where restaurant_id = v_rid and table_label = p_table and kind = p_kind and done_at is null
+    and created_at > now() - interval '30 minutes'
+  order by created_at desc limit 1;
+  if found then return to_jsonb(v_row); end if;
+
+  if (select count(*) from public.service_requests
+      where restaurant_id = v_rid and table_label = p_table
+        and created_at > now() - interval '10 minutes') >= 6 then
+    raise exception 'Le personnel a bien été prévenu, il arrive.';
+  end if;
+
+  insert into public.service_requests (restaurant_id, table_label, kind)
+  values (v_rid, p_table, p_kind)
+  returning * into v_row;
+  return to_jsonb(v_row);
+end;
+$$;
+
+-- ---------- Clôture d'une table (tout est encaissé) ----------
+create or replace function public.close_table(p_restaurant uuid, p_table text)
+returns int
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_count int;
+begin
+  if public.member_role(p_restaurant) is null then raise exception 'Accès refusé'; end if;
+  update public.orders
+  set status  = 'terminee',
+      seen    = true,
+      history = history || jsonb_build_array(jsonb_build_object('status', 'terminee', 'at', now())),
+      payment = jsonb_set(payment, '{status}', '"paid"')
+  where restaurant_id = p_restaurant and table_label = p_table and status <> 'terminee';
+  get diagnostics v_count = row_count;
+  update public.service_requests set done_at = now()
+  where restaurant_id = p_restaurant and table_label = p_table and done_at is null;
+  return v_count;
+end;
+$$;
+
+-- ---------- Photos des plats (Supabase Storage) ----------
+-- Chemin des fichiers : <restaurant_id>/<nom>.jpg — seul le gérant du
+-- restaurant (ou un admin) peut envoyer / supprimer ses photos.
+do $$
+begin
+  if to_regclass('storage.buckets') is not null then
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values ('menu-photos', 'menu-photos', true, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+    on conflict (id) do nothing;
+
+    execute 'drop policy if exists "Photos : envoi par le gérant" on storage.objects';
+    execute $p$create policy "Photos : envoi par le gérant" on storage.objects for insert to authenticated
+      with check (bucket_id = 'menu-photos' and public.member_role(((storage.foldername(name))[1])::uuid) in ('admin', 'owner'))$p$;
+    execute 'drop policy if exists "Photos : modification par le gérant" on storage.objects';
+    execute $p$create policy "Photos : modification par le gérant" on storage.objects for update to authenticated
+      using (bucket_id = 'menu-photos' and public.member_role(((storage.foldername(name))[1])::uuid) in ('admin', 'owner'))$p$;
+    execute 'drop policy if exists "Photos : suppression par le gérant" on storage.objects';
+    execute $p$create policy "Photos : suppression par le gérant" on storage.objects for delete to authenticated
+      using (bucket_id = 'menu-photos' and public.member_role(((storage.foldername(name))[1])::uuid) in ('admin', 'owner'))$p$;
+  end if;
+end $$;
+
+-- ---------- Abonnements (visible uniquement par l'équipe Tapigo) ----------
+create table if not exists public.restaurant_billing (
+  restaurant_id uuid primary key references public.restaurants (id) on delete cascade,
+  plan          text not null default 'Standard',
+  monthly_price numeric(10, 2) not null default 49,
+  status        text not null default 'essai' check (status in ('essai', 'a_jour', 'en_retard', 'resilie')),
+  next_billing  date,
+  notes         text not null default '',
+  updated_at    timestamptz not null default now()
+);
+alter table public.restaurant_billing enable row level security;
+drop policy if exists "Abonnements réservés aux admins" on public.restaurant_billing;
+create policy "Abonnements réservés aux admins" on public.restaurant_billing
+  for all using (public.is_admin()) with check (public.is_admin());
+revoke all on public.restaurant_billing from anon;
+grant select, insert, update on public.restaurant_billing to authenticated;
+
+-- ---------- Données de démonstration pour les statistiques ----------
+-- Génère des commandes passées (marquées "demo") sur les p_days derniers jours.
+create or replace function public.admin_seed_demo_orders(p_restaurant uuid, p_days int default 30)
+returns int
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_menu    jsonb;
+  v_tables  int;
+  v_items   jsonb;
+  v_day     int;
+  v_n       int;
+  v_k       int;
+  v_j       int;
+  v_at      timestamptz;
+  v_local   timestamp;
+  v_item    jsonb;
+  v_group   jsonb;
+  v_choice  jsonb;
+  v_unit    numeric;
+  v_qty     int;
+  v_opts    jsonb;
+  v_lines   jsonb;
+  v_total   numeric;
+  v_number  bigint;
+  v_count   int := 0;
+  v_prep    int;
+begin
+  if not public.is_admin() then raise exception 'Accès refusé'; end if;
+  select menu, coalesce(nullif(info ->> 'tables', '')::int, 12) into v_menu, v_tables
+  from public.restaurants where id = p_restaurant;
+  select coalesce(jsonb_agg(x.value), '[]'::jsonb) into v_items
+  from jsonb_array_elements(coalesce(v_menu -> 'items', '[]'::jsonb)) x
+  where coalesce((x.value ->> 'available')::boolean, true);
+  if jsonb_array_length(v_items) = 0 then raise exception 'La carte est vide'; end if;
+
+  perform pg_advisory_xact_lock(hashtext('tapigo-order-' || p_restaurant::text));
+  select coalesce(max(number), 1000) into v_number from public.orders where restaurant_id = p_restaurant;
+
+  for v_day in reverse greatest(1, least(coalesce(p_days, 30), 90))..1 loop
+    -- Plus de monde le week-end.
+    v_n := 6 + floor(random() * 10)::int
+           + case when extract(isodow from (now() - make_interval(days => v_day)) at time zone 'Europe/Paris') in (5, 6, 7) then 8 else 0 end;
+    for v_k in 1..v_n loop
+      -- Heure locale de Paris (service du midi ou du soir), convertie en instant.
+      v_local := date_trunc('day', (now() - make_interval(days => v_day)) at time zone 'Europe/Paris')
+                 + case when random() < 0.45 then interval '12 hours' + random() * interval '2 hours 30 minutes'
+                        else interval '19 hours' + random() * interval '3 hours' end;
+      v_at := v_local at time zone 'Europe/Paris';
+      v_lines := '[]'::jsonb; v_total := 0;
+      for v_j in 1..(1 + floor(random() * 4)::int) loop
+        v_item := v_items -> floor(random() * jsonb_array_length(v_items))::int;
+        v_qty := case when random() < 0.25 then 2 else 1 end;
+        v_unit := coalesce((v_item ->> 'price')::numeric, 0);
+        v_opts := '[]'::jsonb;
+        for v_group in select value from jsonb_array_elements(coalesce(v_item -> 'options', '[]'::jsonb)) loop
+          if coalesce((v_group ->> 'required')::boolean, false) and jsonb_array_length(coalesce(v_group -> 'choices', '[]'::jsonb)) > 0 then
+            v_choice := v_group -> 'choices' -> floor(random() * jsonb_array_length(v_group -> 'choices'))::int;
+            v_unit := v_unit + coalesce((v_choice ->> 'price')::numeric, 0);
+            v_opts := v_opts || jsonb_build_array(jsonb_build_object('group', v_group ->> 'name', 'values', jsonb_build_array(v_choice ->> 'label')));
+          end if;
+        end loop;
+        v_lines := v_lines || jsonb_build_array(jsonb_build_object(
+          'itemId', v_item ->> 'id', 'name', v_item ->> 'name', 'station', coalesce(v_item ->> 'station', 'cuisine'),
+          'qty', v_qty, 'unitPrice', round(v_unit, 2), 'options', v_opts, 'note', ''));
+        v_total := v_total + v_unit * v_qty;
+      end loop;
+      v_prep := 8 + floor(random() * 14)::int;
+      v_number := v_number + 1;
+      insert into public.orders (restaurant_id, number, table_label, lines, note, payment, total, status, history, seen, created_at)
+      values (p_restaurant, v_number, (1 + floor(random() * v_tables)::int)::text, v_lines, '',
+              jsonb_build_object('method', 'onsite', 'status', 'paid', 'demo', true), round(v_total, 2), 'terminee',
+              jsonb_build_array(
+                jsonb_build_object('status', 'nouvelle', 'at', v_at),
+                jsonb_build_object('status', 'preparation', 'at', v_at + make_interval(mins => 2)),
+                jsonb_build_object('status', 'prete', 'at', v_at + make_interval(mins => v_prep)),
+                jsonb_build_object('status', 'servie', 'at', v_at + make_interval(mins => v_prep + 3)),
+                jsonb_build_object('status', 'terminee', 'at', v_at + make_interval(mins => v_prep + 45))),
+              true, v_at);
+      v_count := v_count + 1;
+    end loop;
+  end loop;
+  return v_count;
+end;
+$$;
+
+create or replace function public.admin_clear_demo_orders(p_restaurant uuid)
+returns int
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_count int;
+begin
+  if not public.is_admin() then raise exception 'Accès refusé'; end if;
+  delete from public.orders where restaurant_id = p_restaurant and coalesce((payment ->> 'demo')::boolean, false);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
 -- ---------- Droits d'exécution ----------
 revoke all on function public.place_order(text, text, jsonb, text) from public;
 revoke all on function public.get_order(uuid) from public;
@@ -450,6 +693,15 @@ grant execute on function public.admin_list_members(uuid) to authenticated;
 grant execute on function public.admin_add_member(uuid, text, text) to authenticated;
 grant execute on function public.admin_remove_member(uuid, uuid) to authenticated;
 
+revoke all on function public.request_service(text, text, text) from public;
+revoke all on function public.close_table(uuid, text) from public;
+revoke all on function public.admin_seed_demo_orders(uuid, int) from public;
+revoke all on function public.admin_clear_demo_orders(uuid) from public;
+grant execute on function public.request_service(text, text, text) to anon, authenticated;
+grant execute on function public.close_table(uuid, text) to authenticated;
+grant execute on function public.admin_seed_demo_orders(uuid, int) to authenticated;
+grant execute on function public.admin_clear_demo_orders(uuid) to authenticated;
+
 -- ---------- Temps réel ----------
 do $$
 begin
@@ -460,6 +712,12 @@ end $$;
 do $$
 begin
   alter publication supabase_realtime add table public.restaurants;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.service_requests;
 exception when duplicate_object then null;
 end $$;
 

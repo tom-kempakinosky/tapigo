@@ -50,6 +50,10 @@
     badge.innerHTML = '<small>Table</small><b>' + (table ? esc(table) : '—') + '</b>';
     badge.setAttribute('aria-label', table ? 'Table ' + table + ', modifier' : 'Indiquer votre numéro de table');
 
+    var pause = $('#pauseBanner');
+    pause.hidden = !r.ordersPaused;
+    pause.innerHTML = '<strong>Commandes en ligne en pause.</strong> Le restaurant est très sollicité : adressez-vous au serveur ou réessayez dans quelques minutes.';
+
     $('#welcome').innerHTML = I.nfc + (table
       ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>. Composez votre commande : elle part directement en cuisine. ' +
         '<button class="link-btn" type="button" data-change-table>Changer de table</button></p>'
@@ -81,6 +85,38 @@
       sessionStorage.setItem('tapigo.v1.table.' + scope, table);
     } catch (e) { /* ignore */ }
     renderHeader();
+  }
+
+  function openService() {
+    if (!table) return openTablePicker(openService);
+    UI.openSheet({
+      label: 'Service',
+      head: '<p class="eyebrow">Table ' + esc(table) + '</p><h2>Besoin de quelque chose ?</h2>',
+      body:
+        '<div class="service-grid">' +
+          '<button class="service-btn" type="button" data-kind="serveur"><span aria-hidden="true">🙋</span><strong>Appeler un serveur</strong><small>Une question, une demande</small></button>' +
+          '<button class="service-btn" type="button" data-kind="addition"><span aria-hidden="true">🧾</span><strong>Demander l’addition</strong><small>Un serveur vient encaisser</small></button>' +
+        '</div>',
+      onMount: function (sheet) {
+        sheet.addEventListener('click', function (e) {
+          var b = e.target.closest('[data-kind]');
+          if (!b || b.disabled) return;
+          sheet.querySelectorAll('[data-kind]').forEach(function (x) { x.disabled = true; });
+          b.querySelector('small').textContent = 'Envoi…';
+          T.requestService(b.dataset.kind, table).then(function () {
+            UI.closeSheet();
+            UI.vibrate([20, 40, 20]);
+            UI.toast(b.dataset.kind === 'addition'
+              ? '🧾 <strong>Demande envoyée.</strong> Un serveur arrive avec l’addition.'
+              : '🙋 <strong>Demande envoyée.</strong> Un serveur arrive à la table ' + esc(table) + '.', 4000);
+          }).catch(function (err) {
+            sheet.querySelectorAll('[data-kind]').forEach(function (x) { x.disabled = false; });
+            b.querySelector('small').textContent = '';
+            UI.toast(esc(err.message), 4000);
+          });
+        });
+      }
+    });
   }
 
   function openTablePicker(onDone) {
@@ -217,6 +253,25 @@
     return sel;
   }
 
+  function allergensHTML(item) {
+    var list = T.itemAllergens(item);
+    if (list.length) {
+      return '<div class="allergens"><span>Allergènes</span><div class="check-row">' + list.map(function (a) {
+        return '<span class="badge badge--warn">' + esc(a.label) + '</span>';
+      }).join('') + '</div></div>';
+    }
+    return item.allergens ? '<p class="allergens">Allergènes : ' + esc(item.allergens) + '</p>' : '';
+  }
+
+  function pairingsHTML(item) {
+    var list = (item.pairings || []).map(T.getItem).filter(function (p) { return p && p.available !== false; });
+    if (!list.length) return '';
+    return '<div class="pairings"><p class="eyebrow">Parfait avec</p>' + list.map(function (p) {
+      return '<button class="pair" type="button" data-pair="' + esc(p.id) + '">' + UI.media(p, 'pair__media') +
+        '<span class="pair__name">' + esc(p.name) + '<small>' + fmt(p.price) + '</small></span><span class="pair__add" aria-hidden="true">+</span></button>';
+    }).join('') + '</div>';
+  }
+
   function openProduct(id) {
     var item = T.getItem(id);
     if (!item || item.available === false) return;
@@ -247,7 +302,8 @@
         '<h2>' + esc(item.name) + '</h2>',
       body:
         '<p class="product-desc">' + esc(item.description) + '</p>' +
-        (item.allergens ? '<p class="allergens">Allergènes : ' + esc(item.allergens) + '</p>' : '') +
+        allergensHTML(item) +
+        pairingsHTML(item) +
         groups +
         '<label class="field"><span>Note pour la cuisine</span>' +
           '<textarea id="pNote" maxlength="140" placeholder="Ex : sans oignon, sauce à part, allergie…"></textarea></label>',
@@ -272,6 +328,19 @@
           wasChecked = lab ? lab.querySelector('input').checked : null;
         });
         sheet.addEventListener('click', function (e) {
+          var pair = e.target.closest('[data-pair]');
+          if (pair) {
+            var p = T.getItem(pair.dataset.pair);
+            if (p && !(p.options || []).some(function (g) { return g.required; })) {
+              addToCart(p.id, 1, {}, '');
+              pair.disabled = true;
+              pair.querySelector('.pair__add').textContent = '✓';
+              UI.toast('<strong>' + esc(p.name) + '</strong> ajouté au panier', 1800);
+            } else if (p) {
+              UI.closeSheet().then(function () { openProduct(p.id); });
+            }
+            return;
+          }
           var input = e.target.closest('.opt-group[data-type="single"][data-required="false"] input');
           if (input && wasChecked) { input.checked = false; wasChecked = null; update(); }
           var step = e.target.closest('[data-step]');
@@ -414,8 +483,9 @@
         var paint = function () {
           body.innerHTML = cartBodyHTML();
           var s = cartSummary();
-          btn.disabled = !s.count;
-          btn.textContent = s.count ? 'Commander · ' + fmt(s.total) : 'Panier vide';
+          var paused = !!state.restaurant.ordersPaused;
+          btn.disabled = !s.count || paused;
+          btn.textContent = paused ? 'Commandes en pause' : s.count ? 'Commander · ' + fmt(s.total) : 'Panier vide';
           renderCartBar();
         };
         paint();
@@ -527,6 +597,7 @@
           var tableNo = table || ($('#tableInput', sheet) && $('#tableInput', sheet).value.trim());
           var tErr = tableError(tableNo);
           if (tErr) return invalid($('#tableInput', sheet), tErr);
+          if (state.restaurant.ordersPaused) return UI.toast('Les commandes en ligne sont en pause. Adressez-vous au serveur.', 4000);
           if (state.payMethod === 'card') {
             var num = $('#ccNum', sheet), exp = $('#ccExp', sheet), cvc = $('#ccCvc', sheet);
             if (!luhn(num.value.replace(/\s/g, ''))) return invalid(num, 'Numéro de carte invalide');
@@ -673,10 +744,16 @@
           (paid ? 'Payé · ' + PAY_LABEL[order.payment.method] : 'À régler sur place') + '</span></div>' +
         '<div class="totals__row totals__row--grand"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
       '</div>' +
+      ((order.status === 'servie' || order.status === 'terminee') && state.restaurant.reviewUrl
+        ? '<div class="review-cta"><p><strong>Vous avez aimé ?</strong> Votre avis aide beaucoup ' + esc(state.restaurant.name) + '.</p>' +
+          '<a class="btn btn--ghost btn--block" href="' + esc(safeUrl(state.restaurant.reviewUrl)) + '" target="_blank" rel="noopener">★ Laisser un avis Google</a></div>'
+        : '') +
       '<button class="btn btn--primary btn--block" type="button" data-close-track>Revenir au menu</button>' +
       '<p class="secure">Cette page se met à jour automatiquement.</p>' +
     '</div>';
   }
+
+  function safeUrl(u) { return /^https:\/\//i.test(u || '') ? u : '#'; }
 
   function showTracking(id) {
     var order = T.getOrder(id);
@@ -845,6 +922,7 @@
     T.track(state.mine);
 
     $('#tableBadge').addEventListener('click', function () { openTablePicker(); });
+    $('#serviceBtn').addEventListener('click', openService);
     $('#welcome').addEventListener('click', function (e) {
       if (e.target.closest('[data-change-table]')) openTablePicker();
     });
