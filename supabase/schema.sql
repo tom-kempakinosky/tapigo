@@ -728,3 +728,7 @@ end $$;
 --
 --   insert into public.admins (user_id) select id from auth.users where email = 'vous@exemple.fr';
 -- ==========================================================================
+
+-- Supabase prend immédiatement en compte les nouvelles fonctions et tables
+-- (évite l'erreur « Could not find the function … in the schema cache »).
+notify pgrst, 'reload schema';
