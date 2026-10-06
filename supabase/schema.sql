@@ -114,6 +114,15 @@ drop function if exists public.is_staff();
 delete from public.orders where restaurant_id is null;
 alter table public.orders alter column restaurant_id set not null;
 create index if not exists orders_restaurant_created_idx on public.orders (restaurant_id, created_at desc);
+
+-- Origine de la commande : le client (plaque NFC) ou un serveur (dashboard).
+alter table public.orders add column if not exists source text not null default 'client';
+alter table public.orders add column if not exists taken_by uuid references auth.users (id) on delete set null;
+do $$
+begin
+  alter table public.orders add constraint orders_source_check check (source in ('client', 'serveur'));
+exception when duplicate_object then null;
+end $$;
 create index if not exists orders_restaurant_number_idx on public.orders (restaurant_id, number desc);
 drop index if exists public.orders_created_at_idx;
 
@@ -202,6 +211,7 @@ declare
   v_number  int;
   v_order   public.orders;
   v_need    jsonb := '{}'::jsonb;
+  v_staff   boolean := false;
   v_key     text;
   v_val     int;
   v_stock   int;
@@ -214,7 +224,9 @@ begin
   if v_menu is null then
     raise exception 'La carte n''est pas encore disponible';
   end if;
-  if coalesce((v_info ->> 'ordersPaused')::boolean, false) then
+  -- Commande saisie par un membre de l'équipe (serveur) depuis le dashboard.
+  v_staff := public.member_role(v_rid) is not null;
+  if not v_staff and coalesce((v_info ->> 'ordersPaused')::boolean, false) then
     raise exception 'Les commandes sont momentanément en pause. Adressez-vous au serveur.';
   end if;
 
@@ -227,13 +239,13 @@ begin
     raise exception 'La table % n''existe pas dans ce restaurant', p_table;
   end if;
 
-  -- Anti-abus : une table ne peut pas envoyer des dizaines de commandes.
-  if (select count(*) from public.orders
+  -- Anti-abus (clients uniquement) : une table ne peut pas envoyer des dizaines de commandes.
+  if not v_staff and (select count(*) from public.orders
       where restaurant_id = v_rid and table_label = p_table
         and created_at > now() - interval '10 minutes') >= 6 then
     raise exception 'Trop de commandes pour cette table. Patientez quelques minutes ou appelez le serveur.';
   end if;
-  if (select count(*) from public.orders
+  if not v_staff and (select count(*) from public.orders
       where restaurant_id = v_rid and created_at > now() - interval '1 minute') >= 40 then
     raise exception 'Le service est très chargé, réessayez dans un instant.';
   end if;
@@ -334,8 +346,10 @@ begin
   where r.id = v_rid
   group by r.next_number;
 
-  insert into public.orders (restaurant_id, number, table_label, lines, note, total)
-  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), round(v_total, 2))
+  insert into public.orders (restaurant_id, number, table_label, lines, note, total, source, taken_by)
+  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), round(v_total, 2),
+          case when v_staff then 'serveur' else 'client' end,
+          case when v_staff then auth.uid() end)
   returning * into v_order;
 
   return to_jsonb(v_order);

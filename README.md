@@ -67,6 +67,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - Bouton **Pause** pour suspendre les commandes en ligne lors d'un coup de feu.
 - Carte : catégories (ajout, renommage, ordre), photos envoyées depuis le téléphone, allergènes, suggestions, prix et ruptures en direct.
 - **Statistiques** : chiffre d'affaires par jour, affluence par heure, plats les plus vendus, panier moyen, temps de préparation, part cuisine / bar, export CSV.
+- **Prise de commande en salle** (tous les rôles) : le serveur choisit la table, ajoute les plats et leurs options, note pour la cuisine, puis envoie. Commande marquée « Prise en salle », non bloquée par la pause ni par l'anti-abus, stocks vérifiés.
 - **Stocks** (toute l'équipe, gérant ou non) : quantités restantes décomptées à chaque commande, plat retiré de la carte à 0, « Plus que N » côté client, mise en rupture / remise en vente, alerte « épuisé » en cuisine.
 - Rôles : Gérant (tout) / Équipe (commandes et stocks ; ni prix, ni carte, ni statistiques).
 

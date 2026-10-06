@@ -286,7 +286,8 @@
       status: 'nouvelle',
       createdAt: now,
       history: [{ status: 'nouvelle', at: now }],
-      seen: false
+      seen: false,
+      source: payload.source || 'client'
     };
     var orders = getOrders();
     orders.push(order);

@@ -66,6 +66,7 @@
       '<header class="ticket__head">' +
         '<div class="ticket__table"><div><small>Table</small><b>' + esc(o.table) + '</b></div></div>' +
         '<div class="ticket__meta"><strong>N° ' + o.number + (o.seen ? '' : ' · <span style="color:var(--danger)">Nouvelle</span>') + '</strong>' +
+          (o.source === 'serveur' ? '<span class="badge badge--info">Prise en salle</span> ' : '') +
           '<span>' + T.clock(o.createdAt) + ' · ' + items + ' article' + (items > 1 ? 's' : '') + '</span></div>' +
         timerHTML(o) +
       '</header>' +
@@ -128,6 +129,7 @@
     var shown = all.filter(forStation);
     var html = requestsHTML() + statsHTML(all) +
       '<div class="k-filters">' +
+        '<button class="btn btn--primary btn--sm" type="button" data-new-order>+ Prendre une commande</button>' +
         seg('layout', state.layout, [['status', 'Par statut'], ['table', 'Par table']]) +
         seg('station', state.station, [['all', 'Tout'], ['cuisine', 'Cuisine'], ['bar', 'Bar']]) +
         (state.sound ? '' : '<button class="btn btn--soft btn--sm" type="button" data-enable-sound>' + I.bell.replace('<svg ', '<svg width="16" height="16" ') + ' Activer les alertes sonores</button>') +
@@ -154,7 +156,9 @@
               (due ? '<span class="badge badge--warn">À encaisser ' + fmt(due) + '</span>' : '<span class="badge badge--ok">Réglée</span>') + '</div>' +
               list.map(ticketHTML).join('') +
               '<div class="table-group__foot"><span>Total de la table <strong>' + fmt(total) + '</strong></span>' +
-              '<button class="btn btn--primary btn--sm" type="button" data-close-table="' + esc(k) + '">Encaisser &amp; clôturer</button></div>' +
+              '<span style="display:flex;gap:6px;flex-wrap:wrap">' +
+                '<button class="btn btn--ghost btn--sm" type="button" data-new-order="' + esc(k) + '">+ Ajouter</button>' +
+                '<button class="btn btn--primary btn--sm" type="button" data-close-table="' + esc(k) + '">Encaisser &amp; clôturer</button></span></div>' +
               '</section>';
           }).join('') + '</div>'
         : '<div class="empty"><h3>Service calme</h3><p>Aucune commande en cours. Les nouvelles commandes apparaîtront ici instantanément.</p></div>';
@@ -200,7 +204,9 @@
   }
 
   /* ---------------- Nouvelle commande : son + visuel ---------------- */
+  var suppressAnnounce = false;
   function announce(order) {
+    if (suppressAnnounce) return;
     if (state.sound) UI.chime();
     UI.vibrate([80, 60, 80]);
     UI.toast('🔔 <strong>Nouvelle commande · Table ' + esc(order.table) + '</strong><br>' +
@@ -653,6 +659,187 @@
   }
 
   /* ======================================================================
+     Prise de commande par un serveur
+     ====================================================================== */
+  function openOrderPad(prefTable) {
+    var menu = T.getMenu();
+    var info = T.getRestaurant();
+    var nTables = Math.max(1, parseInt(info.tables, 10) || 12);
+    var pad = { table: String(prefTable || ''), lines: [], note: '', cat: 'all', q: '', open: null };
+    var orderable = function (i) { return i.available !== false && T.getStock(i.id) !== 0; };
+    var inPad = function (id, except) {
+      return pad.lines.reduce(function (sum, l) { return sum + (l.itemId === id && l !== except ? l.qty : 0); }, 0);
+    };
+    var room = function (id, except) {
+      var st = T.getStock(id);
+      return st == null ? 99 : Math.max(0, st - inPad(id, except));
+    };
+    var built = function (l) { return T.buildLine(l.itemId, l.qty, l.selections, l.note); };
+    var total = function () { return pad.lines.reduce(function (sum, l) { return sum + built(l).unitPrice * l.qty; }, 0); };
+
+    function addLine(id, sel) {
+      if (room(id) <= 0) return UI.toast('Plus aucun disponible');
+      var key = id + '#' + JSON.stringify(sel || {});
+      var line = pad.lines.filter(function (l) { return l.key === key && !l.note; })[0];
+      if (line) line.qty++;
+      else pad.lines.push({ key: key, itemId: id, qty: 1, selections: sel || {}, note: '' });
+      UI.vibrate(10);
+    }
+
+    function itemHTML(i) {
+      var st = T.getStock(i.id), n = inPad(i.id);
+      var html = '<div class="pad-item' + (pad.open === i.id ? ' is-open' : '') + '">' +
+        '<button class="pad-item__main" type="button" data-pad-item="' + esc(i.id) + '">' +
+          '<span class="pad-item__name">' + esc(i.name) +
+            ((i.options || []).length ? ' <small>options</small>' : '') + '</span>' +
+          (st != null ? '<span class="badge ' + (st <= 5 ? 'badge--warn' : '') + '">' + st + ' rest.</span>' : '') +
+          '<span class="pad-item__price">' + fmt(i.price) + '</span>' +
+          (n ? '<span class="pad-item__qty">' + n + '</span>' : '<span class="pad-item__plus" aria-hidden="true">+</span>') +
+        '</button>';
+      if (pad.open === i.id) {
+        html += '<div class="pad-opts" data-pad-opts="' + esc(i.id) + '">' + i.options.map(function (g) {
+          var multi = g.type === 'multi';
+          return '<fieldset class="opt-group" data-group="' + esc(g.id) + '"><legend>' + esc(g.name) +
+            '<small>' + (g.required ? 'Obligatoire' : 'Facultatif') + '</small></legend><div class="check-row check-row--sm">' +
+            g.choices.map(function (c) {
+              return '<label><input type="' + (multi ? 'checkbox' : 'radio') + '" name="po_' + esc(g.id) + '" value="' + esc(c.label) + '"> ' +
+                esc(c.label) + (Number(c.price) ? ' (+' + fmt(c.price) + ')' : '') + '</label>';
+            }).join('') + '</div></fieldset>';
+        }).join('') +
+        '<div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn--ghost btn--sm" type="button" data-pad-cancel>Annuler</button>' +
+        '<button class="btn btn--primary btn--sm" type="button" data-pad-add="' + esc(i.id) + '">Ajouter</button></div></div>';
+      }
+      return html + '</div>';
+    }
+
+    function paint(sheet) {
+      var box = $('#pad', sheet);
+      var focusId = document.activeElement && document.activeElement.id;
+      var q = norm(pad.q);
+      var items = menu.items.filter(function (i) {
+        return orderable(i) && (pad.cat === 'all' || i.category === pad.cat) && (!q || norm(i.name).indexOf(q) >= 0);
+      });
+
+      box.innerHTML =
+        '<div class="field"><span>Table</span>' +
+          (nTables <= 40
+            ? '<div class="pad-tables">' + Array.apply(null, Array(nTables)).map(function (_, k) {
+                var n = String(k + 1);
+                return '<button type="button" data-pad-table="' + n + '" aria-pressed="' + (pad.table === n) + '">' + n + '</button>';
+              }).join('') + '</div>'
+            : '<input class="input" id="padTable" inputmode="numeric" maxlength="4" value="' + esc(pad.table) + '" placeholder="N° de table">') +
+        '</div>' +
+        '<label class="search">' + I.search + '<input id="padSearch" type="search" placeholder="Rechercher un plat…" value="' + esc(pad.q) + '" aria-label="Rechercher un plat"></label>' +
+        '<div class="chips">' + [{ id: 'all', label: 'Tout' }].concat(menu.categories).map(function (c) {
+          return '<button class="chip" type="button" data-pad-cat="' + esc(c.id) + '" aria-pressed="' + (pad.cat === c.id) + '">' + esc(c.label) + '</button>';
+        }).join('') + '</div>' +
+        '<div class="pad-items">' + (items.length ? items.map(itemHTML).join('') : '<p class="help">Aucun plat disponible.</p>') + '</div>' +
+        '<div class="pad-ticket"><p class="eyebrow">Commande' + (pad.table ? ' · Table ' + esc(pad.table) : '') + '</p>' +
+          (pad.lines.length ? pad.lines.map(function (l, idx) {
+            var b = built(l);
+            return '<div class="pad-line">' +
+              '<div class="stepper stepper--sm"><button type="button" data-pad-qty="' + idx + '" data-d="-1" aria-label="Retirer un">−</button><output>' + l.qty + '</output>' +
+                '<button type="button" data-pad-qty="' + idx + '" data-d="1" aria-label="Ajouter un">+</button></div>' +
+              '<div class="pad-line__txt"><strong>' + esc(b.name) + '</strong>' +
+                (b.options.length ? '<small>' + esc(b.options.map(function (o) { return o.values.join(', '); }).join(' · ')) + '</small>' : '') +
+                '<input class="pad-line__note" data-pad-note="' + idx + '" value="' + esc(l.note) + '" placeholder="Note (sans oignon…)" maxlength="140"></div>' +
+              '<span class="pad-line__price">' + fmt(b.unitPrice * l.qty) + '</span></div>';
+          }).join('') : '<p class="help">Touchez un plat pour l’ajouter.</p>') +
+          '<label class="field"><span>Note pour toute la commande</span><input class="input" id="padNote" value="' + esc(pad.note) + '" maxlength="200" placeholder="Ex : servir les entrées ensemble"></label>' +
+        '</div>';
+
+      var n = pad.lines.reduce(function (sum, l) { return sum + l.qty; }, 0);
+      $('#padSend', sheet).disabled = !n || !pad.table;
+      $('#padSend', sheet).textContent = !pad.table ? 'Choisissez la table' : n ? 'Envoyer en cuisine · ' + fmt(total()) : 'Commande vide';
+      if (focusId && $('#' + focusId, sheet)) {
+        var el = $('#' + focusId, sheet);
+        el.focus();
+        if (el.setSelectionRange && el.type !== 'number') el.setSelectionRange(el.value.length, el.value.length);
+      }
+    }
+
+    UI.openSheet({
+      label: 'Prendre une commande',
+      head: '<p class="eyebrow">Prise de commande en salle</p><h2>Nouvelle commande</h2>',
+      body: '<div id="pad" style="display:grid;gap:14px"></div>',
+      footer: '<button class="btn btn--primary" type="button" id="padSend">Envoyer en cuisine</button>',
+      onMount: function (sheet) {
+        paint(sheet);
+        sheet.addEventListener('click', function (e) {
+          var t;
+          if ((t = e.target.closest('[data-pad-table]'))) { pad.table = t.dataset.padTable; return paint(sheet); }
+          if ((t = e.target.closest('[data-pad-cat]'))) { pad.cat = t.dataset.padCat; pad.open = null; return paint(sheet); }
+          if (e.target.closest('[data-pad-cancel]')) { pad.open = null; return paint(sheet); }
+          if ((t = e.target.closest('[data-pad-item]'))) {
+            var item = T.getItem(t.dataset.padItem);
+            if ((item.options || []).length) { pad.open = pad.open === item.id ? null : item.id; return paint(sheet); }
+            addLine(item.id, {});
+            return paint(sheet);
+          }
+          if ((t = e.target.closest('[data-pad-add]'))) {
+            var it = T.getItem(t.dataset.padAdd), panel = t.closest('[data-pad-opts]'), sel = {}, missing = null;
+            it.options.forEach(function (g) {
+              var picked = [].slice.call(panel.querySelectorAll('[name="po_' + g.id + '"]:checked')).map(function (x) { return x.value; });
+              if (picked.length) sel[g.id] = picked;
+              else if (g.required && !missing) missing = g.name;
+            });
+            if (missing) return UI.toast('Choisissez : ' + esc(missing));
+            addLine(it.id, sel);
+            pad.open = null;
+            return paint(sheet);
+          }
+          if ((t = e.target.closest('[data-pad-qty]'))) {
+            var line = pad.lines[+t.dataset.padQty];
+            if (Number(t.dataset.d) > 0 && room(line.itemId, line) <= line.qty) return UI.toast('Plus aucun disponible');
+            line.qty += Number(t.dataset.d);
+            if (line.qty <= 0) pad.lines.splice(+t.dataset.padQty, 1);
+            return paint(sheet);
+          }
+          if (e.target.closest('#padSend')) return send(sheet);
+        });
+        sheet.addEventListener('input', function (e) {
+          if (e.target.id === 'padSearch') { pad.q = e.target.value; pad.open = null; paint(sheet); }
+          if (e.target.id === 'padTable') { pad.table = e.target.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 4); paint(sheet); }
+        });
+        sheet.addEventListener('change', function (e) {
+          if (e.target.id === 'padNote') pad.note = e.target.value.trim();
+          if (e.target.matches('[data-pad-note]')) pad.lines[+e.target.dataset.padNote].note = e.target.value.trim();
+        });
+      }
+    });
+
+    function send(sheet) {
+      var btn = $('#padSend', sheet);
+      var noteEl = $('#padNote', sheet);
+      if (noteEl) pad.note = noteEl.value.trim();
+      sheet.querySelectorAll('[data-pad-note]').forEach(function (el) { pad.lines[+el.dataset.padNote].note = el.value.trim(); });
+      if (/^\d+$/.test(pad.table) && (+pad.table < 1 || +pad.table > nTables)) return UI.toast('La table ' + esc(pad.table) + ' n’existe pas (1 à ' + nTables + ')');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> Envoi…';
+      suppressAnnounce = true;
+      Promise.resolve().then(function () {
+        return T.createOrder({
+          table: pad.table,
+          note: pad.note,
+          source: 'serveur',
+          payment: { method: 'onsite', status: 'pending' },
+          lines: pad.lines.map(built)
+        });
+      }).then(function (o) {
+        suppressAnnounce = false;
+        UI.closeSheet();
+        UI.toast('✓ Commande n° <strong>' + o.number + '</strong> envoyée · table ' + esc(o.table));
+        if (state.view === 'orders') renderOrders();
+      }).catch(function (err) {
+        suppressAnnounce = false;
+        btn.disabled = false;
+        btn.textContent = 'Envoyer en cuisine · ' + fmt(total());
+        UI.toast(esc(err.message), 5000);
+      });
+    }
+  }
+
+  /* ======================================================================
      Stocks — gérés par toute l'équipe (gérant ou non)
      ====================================================================== */
   var stockQ = '';
@@ -828,6 +1015,7 @@
       if ((t = e.target.closest('[data-station]'))) { state.station = t.dataset.station; savePrefs(); return renderOrders(); }
       if (e.target.closest('[data-enable-sound]')) return setSound(true);
       if ((t = e.target.closest('[data-reopen]'))) return T.updateOrderStatus(t.dataset.reopen, 'servie');
+      if ((t = e.target.closest('[data-new-order]'))) return openOrderPad(t.dataset.newOrder || '');
       if ((t = e.target.closest('[data-request-done]'))) { T.completeServiceRequest(t.dataset.requestDone); return renderOrders(); }
       if ((t = e.target.closest('[data-close-table]'))) {
         var tb = t.dataset.closeTable;

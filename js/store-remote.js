@@ -79,7 +79,8 @@
       status: r.status,
       createdAt: ts(r.created_at),
       history: (r.history || []).map(function (h) { return { status: h.status, at: ts(h.at) }; }),
-      seen: !!r.seen
+      seen: !!r.seen,
+      source: r.source || 'client'
     };
   }
 
@@ -263,8 +264,9 @@
     }).then(function (r) {
       if (r.error) throw new Error(r.error.message);
       var o = upsert(fromRow(r.data));
-      tracked[o.id] = o.status;
-      ensurePolling();
+      // Le suivi par interrogation ne concerne que le client (l'équipe a le temps réel).
+      if (!current.role) { tracked[o.id] = o.status; ensurePolling(); }
+      emit('orders:sync', null);
       return clone(o);
     });
   };
@@ -436,7 +438,7 @@
     var since = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
     var out = [];
     function page(from) {
-      return sb.from('orders').select('id, number, table_label, lines, total, status, history, payment, created_at')
+      return sb.from('orders').select('id, number, table_label, lines, total, status, history, payment, created_at, source')
         .eq('restaurant_id', current.id).gte('created_at', since)
         .order('created_at', { ascending: true }).range(from, from + 999)
         .then(function (r) {
