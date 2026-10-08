@@ -981,6 +981,11 @@
     start();
   }).catch(function (err) {
     var lost = err && err.code === 'NOT_FOUND';
+    // Écran d'erreur épuré : rien d'inutilisable autour du message.
+    ['#toolbar', '#welcome', '#tableBadge', '#serviceBtn', '#pauseBanner'].forEach(function (sel) {
+      var el = document.querySelector(sel);
+      if (el) el.hidden = true;
+    });
     var title = !lost ? 'Menu momentanément indisponible'
       : err.reason === 'closed' ? 'Commandes en pause'
       : err.reason === 'old-link' ? 'Lien à mettre à jour'
