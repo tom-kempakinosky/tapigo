@@ -34,6 +34,17 @@
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
 
+  // Fiche restaurant. Tolère une base pas encore mise à jour (schema.sql non
+  // relancé) : sans la colonne online_payment, on relit sans elle.
+  var payColumn = true;
+  function selectRestaurant(cols, build) {
+    var run = function () { return build(sb.from('restaurants').select(cols + (payColumn ? ', online_payment' : ''))); };
+    return run().then(function (r) {
+      if (r.error && payColumn && /online_payment/.test(r.error.message || '')) { payColumn = false; return run(); }
+      return r;
+    });
+  }
+
   function fail(err) {
     var msg = (err && err.message) || String(err || 'Erreur inconnue');
     console.error('[Tapigo]', err);
@@ -138,7 +149,7 @@
   }
 
   function refreshRestaurant() {
-    return sb.from('restaurants').select('info, menu, online_payment').eq('id', current.id).maybeSingle().then(function (r) {
+    return selectRestaurant('info, menu', function (q) { return q.eq('id', current.id).maybeSingle(); }).then(function (r) {
       if (r.error) throw r.error;
       if (!r.data) return;
       var before = JSON.stringify([cache.info, cache.menu, cache.onlinePayment]);
@@ -305,9 +316,9 @@
   /* ---------------- Côté client ---------------- */
   // slug absent (ancienne plaque sans ?r=) : accepté s'il n'existe qu'un restaurant.
   T.openRestaurant = function (slug) {
-    var q = sb.from('restaurants').select('id, slug, info, menu, active, online_payment');
-    q = slug ? q.eq('slug', slug).limit(1) : q.eq('active', true).limit(2);
-    return q.then(function (r) {
+    return selectRestaurant('id, slug, info, menu, active', function (q) {
+      return slug ? q.eq('slug', slug).limit(1) : q.eq('active', true).limit(2);
+    }).then(function (r) {
       if (r.error) throw new Error('Base de données inaccessible : ' + r.error.message);
       var rows = r.data || [];
       if (!slug && rows.length !== 1) throw notFound(rows.length ? 'old-link' : 'closed', '');
@@ -505,7 +516,7 @@
     staffStarted = true;
     current = { id: restaurant.id, slug: restaurant.slug, role: restaurant.role };
 
-    return sb.from('restaurants').select('info, menu, online_payment').eq('id', current.id).maybeSingle().then(function (r) {
+    return selectRestaurant('info, menu', function (q) { return q.eq('id', current.id).maybeSingle(); }).then(function (r) {
       if (r.error) throw r.error;
       if (!r.data) throw new Error('Restaurant introuvable.');
       applyRestaurant(r.data);
