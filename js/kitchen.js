@@ -34,7 +34,7 @@
     { id: 'servie', label: 'Servie' },
     { id: 'terminee', label: 'Terminée' }
   ];
-  var PAY = { applepay: 'Apple Pay', card: 'Carte', onsite: 'Sur place' };
+  var PAY = { applepay: 'Apple Pay', card: 'Carte', onsite: 'Sur place', online: 'en ligne' };
 
   function savePrefs() { T.write(PREFS_KEY, { layout: state.layout, station: state.station }); }
 
@@ -487,9 +487,11 @@
           '<label class="field span-2"><span>Lien à écrire sur toutes les plaques NFC (le client indique sa table)</span>' +
             '<input id="nfcLinks" readonly value="' + esc(nfcLink()) + '" style="font-size:13px;font-family:ui-monospace,Menlo,monospace">' +
             '<button class="btn btn--soft btn--sm" type="button" id="copyLinks" style="justify-self:start">Copier le lien</button></label>' +
-        '</form>',
+        '</form>' +
+        (LIVE && T.payments ? '<section class="pay-setup"><h3>Paiement en ligne</h3><div id="payBox"><p class="help"><span class="spinner"></span> Vérification…</p></div></section>' : ''),
       footer: '<button class="btn btn--primary" type="submit" form="settingsForm">Enregistrer</button>',
       onMount: function (sheet) {
+        if (LIVE && T.payments) mountPayments($('#payBox', sheet));
         $('#copyLinks', sheet).addEventListener('click', function () {
           var ta = $('#nfcLinks', sheet);
           var ok = function () { UI.toast('Lien copié'); };
@@ -514,6 +516,71 @@
         });
       }
     });
+  }
+
+  /* ======================================================================
+     Paiement en ligne (Stripe Connect) — réservé au gérant
+     ====================================================================== */
+  function payBoxHTML(st) {
+    var free = '<p class="help">Les paiements arrivent directement sur le compte Stripe du restaurant (virement automatique). ' +
+      'Tapigo ne prend aucune commission : seuls les frais Stripe s’appliquent. Votre terminal reste utilisable pour « Payer à table ».</p>';
+    if (!st.connected) {
+      return '<p>Permettez à vos clients de payer depuis leur téléphone (carte, Apple Pay, Google Pay) au moment de commander.</p>' + free +
+        '<button class="btn btn--primary btn--sm" type="button" data-pay-onboard>Connecter mon compte Stripe</button>';
+    }
+    if (!st.charges_enabled) {
+      return '<p><span class="badge badge--warn">Compte Stripe à finaliser</span></p>' +
+        '<p class="help">Stripe a besoin de quelques informations (identité, IBAN…) avant d’accepter des paiements.</p>' +
+        '<button class="btn btn--primary btn--sm" type="button" data-pay-onboard>Terminer la configuration Stripe</button>';
+    }
+    return '<p><span class="badge badge--ok">Compte Stripe actif</span></p>' +
+      '<label class="switch"><input type="checkbox" data-pay-toggle' + (st.online_payment ? ' checked' : '') + '><span class="switch__track"></span>' +
+        '<span>Proposer « Payer maintenant » aux clients</span></label>' + free +
+      '<a class="link-btn" href="https://dashboard.stripe.com" target="_blank" rel="noopener">Ouvrir mon tableau de bord Stripe ↗</a>';
+  }
+
+  function mountPayments(box) {
+    if (!canManage()) { box.innerHTML = '<p class="help">Réservé au gérant.</p>'; return; }
+    var st = null;
+    var paint = function () { box.innerHTML = payBoxHTML(st); };
+    T.payments.status().then(function (r) { st = r; paint(); }, function (err) {
+      box.innerHTML = '<p class="help">' + esc(err.message) + '</p>';
+    });
+    box.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-pay-onboard]');
+      if (!b) return;
+      b.disabled = true;
+      b.innerHTML = '<span class="spinner"></span> Ouverture de Stripe…';
+      T.payments.onboard().then(function (r) { location.href = r.url; }, function (err) {
+        UI.toast(esc(err.message), 5000);
+        paint();
+      });
+    });
+    box.addEventListener('change', function (e) {
+      if (!e.target.matches('[data-pay-toggle]')) return;
+      var on = e.target.checked;
+      e.target.disabled = true;
+      T.payments.setEnabled(on).then(function () {
+        st.online_payment = on;
+        UI.toast(on ? 'Paiement en ligne proposé aux clients' : 'Paiement en ligne désactivé · les clients paient à table');
+        paint();
+      }, function (err) { UI.toast(esc(err.message), 5000); paint(); });
+    });
+  }
+
+  // Retour du formulaire Stripe (kitchen.html?stripe=retour).
+  function stripeReturn() {
+    var q = new URLSearchParams(location.search);
+    var back = q.get('stripe');
+    if (!back || !LIVE || !T.payments) return;
+    q.delete('stripe');
+    try { history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q.toString() : '')); } catch (e) { /* ignore */ }
+    T.payments.status().then(function (st) {
+      UI.toast(st.charges_enabled
+        ? 'Compte Stripe actif ✓ Activez « Payer maintenant » dans Établissement.'
+        : 'Configuration Stripe incomplète : reprenez-la depuis Établissement → Paiement en ligne.', 6000);
+      if (st.charges_enabled && !st.online_payment) openSettings();
+    }, function (err) { UI.toast(esc(err.message), 5000); });
   }
 
   /* ======================================================================
@@ -880,7 +947,76 @@
     '</div>';
   }
 
+  /* ---------------- Prévision IA du jour ---------------- */
+  var fc = { data: null, loaded: false, loading: false, running: false, error: '' };
+
+  function loadForecast() {
+    if (!T.forecast || fc.loading) return;
+    fc.loading = true;
+    T.forecast.get().then(function (f) { fc.data = f; }, function (err) { fc.error = err.message; })
+      .then(function () { fc.loaded = true; fc.loading = false; if (state.view === 'stock') renderStock(); });
+  }
+
+  function runForecast(context) {
+    fc.running = true; fc.error = '';
+    renderStock();
+    T.forecast.run(context).then(function (f) {
+      fc.data = f;
+      UI.toast(f.source === 'ia' ? 'Prévision IA du jour prête' : 'Prévision du jour prête');
+    }, function (err) { fc.error = err.message; UI.toast(esc(err.message), 5000); })
+      .then(function () { fc.running = false; renderStock(); });
+  }
+
+  // Suggestions encore utiles : produit présent et quantité différente du stock saisi.
+  function forecastRows() {
+    if (!fc.data) return [];
+    return (fc.data.items || []).map(function (s) {
+      var item = T.getItem(s.itemId);
+      return item ? { item: item, quantity: s.quantity, reason: s.reason, current: T.getStock(s.itemId) } : null;
+    }).filter(Boolean);
+  }
+
+  function forecastHTML() {
+    if (!T.forecast) return '';
+    var head = '<div class="forecast__head"><div><p class="eyebrow">' + I.bolt.replace('<svg ', '<svg width="14" height="14" ') + ' Prévision IA · aujourd’hui</p>' +
+      '<h2>Stock conseillé pour la journée</h2></div>';
+    var ctxField = '<div class="forecast__ctx"><input id="fcContext" maxlength="300" placeholder="Contexte du jour (facultatif) : météo, match, groupe de 20 réservé…" value="' +
+      esc(fc.data && fc.data.context || '') + '" aria-label="Contexte du jour">' +
+      '<button class="btn btn--ghost btn--sm" type="button" data-fc-run' + (fc.running ? ' disabled' : '') + '>' +
+      (fc.running ? '<span class="spinner"></span> Analyse en cours…' : fc.data ? 'Recalculer' : 'Calculer la prévision') + '</button></div>';
+
+    if (!fc.loaded) return '<section class="forecast">' + head + '</div><p class="help"><span class="spinner"></span> Chargement…</p></section>';
+    if (!fc.data) {
+      return '<section class="forecast">' + head + '</div>' +
+        '<p class="forecast__summary">Chaque matin, l’IA analyse les ventes des dernières semaines (même jour, tendance) et propose la quantité à prévoir pour chaque produit. ' +
+        'Rien n’est modifié sans votre validation.</p>' +
+        (fc.error ? '<p class="help" style="color:var(--danger)">' + esc(fc.error) + '</p>' : '') + ctxField + '</section>';
+    }
+    var rows = forecastRows();
+    var todo = rows.filter(function (r) { return r.current !== r.quantity; });
+    var when = fc.data.created_at ? T.clock(Date.parse(fc.data.created_at)) : '';
+    return '<section class="forecast">' + head +
+        (todo.length ? '<button class="btn btn--primary btn--sm" type="button" data-fc-all>Tout appliquer (' + todo.length + ')</button>' : '') +
+      '</div>' +
+      '<p class="forecast__summary">' + esc(fc.data.summary || '') + '</p>' +
+      ((fc.data.alerts || []).length ? '<ul class="forecast__alerts">' + fc.data.alerts.map(function (a) { return '<li>' + esc(a) + '</li>'; }).join('') + '</ul>' : '') +
+      (rows.length ? '<div class="forecast__list">' + rows.map(function (r) {
+        var same = r.current === r.quantity;
+        return '<div class="fc-row' + (same ? ' is-done' : '') + '">' +
+          '<div class="fc-row__name"><strong>' + esc(r.item.name) + '</strong><small>' + esc(r.reason) + '</small></div>' +
+          '<div class="fc-row__qty"><span>' + (r.current == null ? '∞' : r.current) + '</span><span aria-hidden="true">→</span><b>' + r.quantity + '</b></div>' +
+          (same ? '<span class="badge badge--ok">Appliqué</span>'
+                : '<button class="btn btn--soft btn--sm" type="button" data-fc-apply="' + esc(r.item.id) + '">Appliquer</button>') +
+        '</div>';
+      }).join('') + '</div>' : '') +
+      ctxField +
+      '<p class="help">' + (fc.data.source === 'ia' ? 'Analyse IA (Claude)' : 'Base statistique') + (when ? ' · calculée à ' + when : '') +
+        ' · « Appliquer » remplace la quantité restante du produit.</p>' +
+    '</section>';
+  }
+
   function renderStock() {
+    if (!fc.loaded) loadForecast();
     var menu = T.getMenu();
     var q = norm(stockQ);
     var items = menu.items.filter(function (i) { return !q || norm(i.name).indexOf(q) >= 0; });
@@ -893,6 +1029,7 @@
         '<div class="stat-tile"><span>Stock bas</span><b>' + count('low') + '</b><small>' + LOW + ' restants ou moins</small></div>' +
         '<div class="stat-tile"><span>Suivis en quantité</span><b>' + Object.keys(T.getStocks()).length + '</b><small>les autres sont illimités</small></div>' +
       '</div>' +
+      forecastHTML() +
       '<p class="help">Indiquez combien de portions il reste : chaque commande les décompte automatiquement et, à 0, le plat disparaît de la carte client. ' +
         'Laissez vide pour un stock illimité. Toute l’équipe peut gérer les stocks ; les prix et la carte restent réservés au gérant.</p>' +
       '<label class="search">' + I.search + '<input id="stockSearch" type="search" placeholder="Rechercher un produit…" value="' + esc(stockQ) + '" aria-label="Rechercher un produit"></label>' +
@@ -905,10 +1042,12 @@
     '</div>';
 
     var view = $('#stockView');
-    var focus = document.activeElement && document.activeElement.id === 'stockSearch';
-    var caret = focus ? document.activeElement.selectionStart : 0;
+    var active = document.activeElement && /^(stockSearch|fcContext)$/.test(document.activeElement.id) ? document.activeElement.id : null;
+    var caret = active ? document.activeElement.selectionStart : 0;
+    var typed = $('#fcContext') ? $('#fcContext').value : null;
     view.innerHTML = html;
-    if (focus) { var s = $('#stockSearch'); s.focus(); s.setSelectionRange(caret, caret); }
+    if (typed !== null && $('#fcContext')) $('#fcContext').value = typed;
+    if (active) { var s = $('#' + active); s.focus(); s.setSelectionRange(caret, caret); }
     updateStockBadge();
   }
 
@@ -1043,6 +1182,20 @@
       if (e.target.id === 'stockSearch') { stockQ = e.target.value; renderStock(); }
     });
     stockView.addEventListener('click', function (e) {
+      var f;
+      if (e.target.closest('[data-fc-run]')) return runForecast(($('#fcContext') || {}).value || '');
+      if ((f = e.target.closest('[data-fc-apply]'))) {
+        var sug = forecastRows().filter(function (r) { return r.item.id === f.dataset.fcApply; })[0];
+        if (sug) { applyQty(sug.item.id, sug.quantity); UI.toast('<strong>' + esc(sug.item.name) + '</strong> · stock réglé à ' + sug.quantity); }
+        return;
+      }
+      if (e.target.closest('[data-fc-all]')) {
+        var todo = forecastRows().filter(function (r) { return r.current !== r.quantity; });
+        if (!todo.length || !confirm('Appliquer les ' + todo.length + ' quantités conseillées ? Les stocks saisis pour ces produits seront remplacés.')) return;
+        todo.forEach(function (r) { T.setStock(r.item.id, r.quantity); });
+        UI.toast('Stocks du jour mis à jour (' + todo.length + ' produits)');
+        return;
+      }
       var row = e.target.closest('[data-stock]');
       if (!row) return;
       var id = row.dataset.stock;
@@ -1068,6 +1221,7 @@
     });
     stockView.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && e.target.matches('[data-qty-input]')) e.target.blur();
+      if (e.key === 'Enter' && e.target.id === 'fcContext' && !fc.running) runForecast(e.target.value);
     });
 
     var menuView = $('#menuView');
@@ -1179,6 +1333,7 @@
     updateStockBadge();
     setView('orders');
     tickTimers();
+    stripeReturn();
   }
 
   function showLogin(message) {

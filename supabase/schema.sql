@@ -185,10 +185,52 @@ grant update (info, menu, updated_at) on public.restaurants to authenticated;
 grant update (seen) on public.orders to authenticated;
 grant select on public.restaurants, public.admins, public.restaurant_members, public.orders to anon, authenticated;
 
+-- ---------- Paiement en ligne (Stripe Connect, sans commission) ----------
+-- Chaque restaurant encaisse sur SON compte Stripe : Tapigo ne prélève rien.
+-- online_payment n'est modifiable que via set_online_payment().
+alter table public.restaurants add column if not exists online_payment boolean not null default false;
+
+create table if not exists public.restaurant_payments (
+  restaurant_id     uuid primary key references public.restaurants (id) on delete cascade,
+  stripe_account_id text,
+  charges_enabled   boolean not null default false,
+  details_submitted boolean not null default false,
+  updated_at        timestamptz not null default now()
+);
+alter table public.restaurant_payments enable row level security;
+drop policy if exists "Paiement visible par le gérant" on public.restaurant_payments;
+create policy "Paiement visible par le gérant" on public.restaurant_payments
+  for select using (public.member_role(restaurant_id) in ('admin', 'owner'));
+revoke all on public.restaurant_payments from anon;
+revoke insert, update, delete on public.restaurant_payments from authenticated;
+grant select on public.restaurant_payments to authenticated;
+
+-- Commande payée en ligne non aboutie : on rend le stock puis on la supprime.
+create or replace function public.release_awaiting_order(p_id uuid)
+returns boolean
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_order public.orders;
+  v_line  jsonb;
+begin
+  delete from public.orders where id = p_id and payment ->> 'status' = 'awaiting'
+  returning * into v_order;
+  if not found then return false; end if;
+  for v_line in select value from jsonb_array_elements(v_order.lines) loop
+    update public.item_stock
+    set quantity = quantity + coalesce((v_line ->> 'qty')::int, 0), updated_at = now()
+    where restaurant_id = v_order.restaurant_id and item_id = v_line ->> 'itemId';
+  end loop;
+  return true;
+end;
+$$;
+
 -- ---------- Prise de commande (client) ----------
 -- Les prix sont recalculés ici, à partir de la carte en base :
 -- un client ne peut pas modifier le montant de sa commande.
-create or replace function public.place_order(p_restaurant text, p_table text, p_items jsonb, p_note text default '')
+drop function if exists public.place_order(text, text, jsonb, text);
+create or replace function public.place_order(p_restaurant text, p_table text, p_items jsonb, p_note text default '', p_pay text default 'onsite')
 returns jsonb
 language plpgsql security definer set search_path = public
 as $$
@@ -216,8 +258,11 @@ declare
   v_val     int;
   v_stock   int;
   v_name    text;
+  v_online  boolean;
+  v_payment jsonb := '{"method": "onsite", "status": "pending"}'::jsonb;
 begin
-  select id, menu, info into v_rid, v_menu, v_info from public.restaurants where slug = p_restaurant and active;
+  select id, menu, info, online_payment into v_rid, v_menu, v_info, v_online
+  from public.restaurants where slug = p_restaurant and active;
   if v_rid is null then
     raise exception 'Restaurant introuvable';
   end if;
@@ -229,6 +274,23 @@ begin
   if not v_staff and coalesce((v_info ->> 'ordersPaused')::boolean, false) then
     raise exception 'Les commandes sont momentanément en pause. Adressez-vous au serveur.';
   end if;
+
+  -- Paiement en ligne (Stripe) : la commande reste invisible en cuisine tant
+  -- que le paiement n'est pas confirmé par Stripe (voir payment_confirmed).
+  if coalesce(p_pay, 'onsite') = 'online' then
+    if not v_online
+       or not exists (select 1 from public.restaurant_payments where restaurant_id = v_rid and charges_enabled) then
+      raise exception 'Le paiement en ligne n''est pas disponible dans ce restaurant. Choisissez « Payer à table ».';
+    end if;
+    v_payment := '{"method": "online", "status": "awaiting"}'::jsonb;
+  elsif p_pay <> 'onsite' then
+    raise exception 'Moyen de paiement invalide';
+  end if;
+
+  -- Paiements en ligne abandonnés depuis plus d'une heure : stock libéré.
+  perform public.release_awaiting_order(o.id) from public.orders o
+  where o.restaurant_id = v_rid and o.payment ->> 'status' = 'awaiting'
+    and o.created_at < now() - interval '1 hour';
 
   p_table := left(regexp_replace(coalesce(p_table, ''), '[^0-9A-Za-z-]', '', 'g'), 6);
   if p_table = '' then
@@ -346,8 +408,8 @@ begin
   where r.id = v_rid
   group by r.next_number;
 
-  insert into public.orders (restaurant_id, number, table_label, lines, note, total, source, taken_by)
-  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), round(v_total, 2),
+  insert into public.orders (restaurant_id, number, table_label, lines, note, payment, total, source, taken_by)
+  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), v_payment, round(v_total, 2),
           case when v_staff then 'serveur' else 'client' end,
           case when v_staff then auth.uid() end)
   returning * into v_order;
@@ -566,7 +628,8 @@ begin
       seen    = true,
       history = history || jsonb_build_array(jsonb_build_object('status', 'terminee', 'at', now())),
       payment = jsonb_set(payment, '{status}', '"paid"')
-  where restaurant_id = p_restaurant and table_label = p_table and status <> 'terminee';
+  where restaurant_id = p_restaurant and table_label = p_table and status <> 'terminee'
+    and payment ->> 'status' is distinct from 'awaiting';
   get diagnostics v_count = row_count;
   update public.service_requests set done_at = now()
   where restaurant_id = p_restaurant and table_label = p_table and done_at is null;
@@ -768,8 +831,65 @@ begin
 end;
 $$;
 
+-- ---------- Paiement en ligne : confirmation (appelée par le webhook Stripe) ----------
+-- La commande apparaît en cuisine au moment du paiement, comme une nouvelle commande.
+create or replace function public.payment_confirmed(p_id uuid, p_ref text)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_order public.orders;
+begin
+  update public.orders
+  set payment    = jsonb_build_object('method', 'online', 'status', 'paid', 'ref', p_ref, 'paidAt', now()),
+      created_at = now(),
+      history    = jsonb_build_array(jsonb_build_object('status', 'nouvelle', 'at', now())),
+      seen       = false
+  where id = p_id and payment ->> 'status' = 'awaiting'
+  returning * into v_order;
+  if not found then return null; end if;
+  return to_jsonb(v_order);
+end;
+$$;
+
+-- Le gérant active / coupe le paiement en ligne (compte Stripe validé requis).
+create or replace function public.set_online_payment(p_restaurant uuid, p_enabled boolean)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if public.member_role(p_restaurant) not in ('admin', 'owner') then raise exception 'Accès refusé'; end if;
+  if p_enabled and not exists (select 1 from public.restaurant_payments
+                               where restaurant_id = p_restaurant and charges_enabled) then
+    raise exception 'Terminez d''abord la configuration de votre compte Stripe.';
+  end if;
+  update public.restaurants set online_payment = p_enabled, updated_at = now() where id = p_restaurant;
+end;
+$$;
+
+-- ---------- Prévisions de stock par IA (une ligne par restaurant et par jour) ----------
+-- Remplies par la fonction stock-forecast (chaque matin + à la demande).
+create table if not exists public.stock_forecasts (
+  restaurant_id uuid not null references public.restaurants (id) on delete cascade,
+  for_date      date not null,
+  items         jsonb not null default '[]'::jsonb, -- [{ itemId, quantity, reason }]
+  summary       text not null default '',
+  alerts        jsonb not null default '[]'::jsonb,
+  context       text not null default '',
+  source        text not null default 'ia' check (source in ('ia', 'statistique')),
+  created_at    timestamptz not null default now(),
+  primary key (restaurant_id, for_date)
+);
+alter table public.stock_forecasts enable row level security;
+drop policy if exists "Prévisions visibles par l'équipe" on public.stock_forecasts;
+create policy "Prévisions visibles par l'équipe" on public.stock_forecasts
+  for select using (public.member_role(restaurant_id) is not null);
+revoke all on public.stock_forecasts from anon;
+revoke insert, update, delete on public.stock_forecasts from authenticated;
+grant select on public.stock_forecasts to authenticated;
+
 -- ---------- Droits d'exécution ----------
-revoke all on function public.place_order(text, text, jsonb, text) from public;
+revoke all on function public.place_order(text, text, jsonb, text, text) from public;
 revoke all on function public.get_order(uuid) from public;
 revoke all on function public.set_order_status(uuid, text) from public;
 revoke all on function public.my_restaurants() from public;
@@ -779,7 +899,7 @@ revoke all on function public.admin_list_members(uuid) from public;
 revoke all on function public.admin_add_member(uuid, text, text) from public;
 revoke all on function public.admin_remove_member(uuid, uuid) from public;
 
-grant execute on function public.place_order(text, text, jsonb, text) to anon, authenticated;
+grant execute on function public.place_order(text, text, jsonb, text, text) to anon, authenticated;
 grant execute on function public.get_order(uuid) to anon, authenticated;
 grant execute on function public.is_admin() to anon, authenticated;
 grant execute on function public.member_role(uuid) to anon, authenticated;
@@ -803,6 +923,13 @@ grant execute on function public.set_stock(uuid, text, int) to authenticated;
 grant execute on function public.set_item_available(uuid, text, boolean) to authenticated;
 grant execute on function public.admin_seed_demo_orders(uuid, int) to authenticated;
 grant execute on function public.admin_clear_demo_orders(uuid) to authenticated;
+-- Paiement en ligne : seules les fonctions serveur (clé service_role) confirment ou annulent.
+revoke all on function public.release_awaiting_order(uuid) from public, anon, authenticated;
+revoke all on function public.payment_confirmed(uuid, text) from public, anon, authenticated;
+revoke all on function public.set_online_payment(uuid, boolean) from public;
+grant execute on function public.release_awaiting_order(uuid) to service_role;
+grant execute on function public.payment_confirmed(uuid, text) to service_role;
+grant execute on function public.set_online_payment(uuid, boolean) to authenticated;
 
 -- ---------- Temps réel ----------
 do $$

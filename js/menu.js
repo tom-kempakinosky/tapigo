@@ -572,10 +572,13 @@
     var s = cartSummary();
     if (!s.count) return;
     var walletLabel = /android/i.test(navigator.userAgent) ? 'Google Pay' : 'Apple Pay';
+    // En ligne : « Payer maintenant » si le restaurant a activé le paiement Stripe.
+    var online = LIVE && T.canPayOnline();
+    if (LIVE && !online) state.payMethod = 'onsite';
 
     UI.openSheet({
       label: 'Paiement',
-      head: '<p class="eyebrow">Étape finale</p><h2>' + (LIVE ? 'Valider la commande' : 'Payer &amp; commander') + '</h2>',
+      head: '<p class="eyebrow">Étape finale</p><h2>' + (LIVE && !online ? 'Valider la commande' : 'Payer &amp; commander') + '</h2>',
       body:
         (table
           ? '<div class="totals"><div class="totals__row"><span>Table</span><strong style="color:var(--ink)">' + esc(table) + '</strong></div>' +
@@ -583,14 +586,13 @@
           : '<label class="field"><span>Numéro de votre table</span><input id="tableInput" inputmode="numeric" maxlength="4" placeholder="Ex : 12" autofocus>' +
             '<small class="help">Indiqué sur le chevalet NFC posé sur votre table.</small></label>') +
         '<div class="pay-methods" role="radiogroup" aria-label="Moyen de paiement">' +
-          (LIVE ? '' :
+          (LIVE ? (online ? payMethodHTML('online', I.card, 'Payer maintenant', 'Carte, ' + walletLabel + ' · paiement sécurisé') : '') :
             payMethodHTML('applepay', I.apple, walletLabel, 'Paiement express en un geste') +
             payMethodHTML('card', I.card, 'Carte bancaire', 'Visa, Mastercard, Amex · via Stripe')) +
-          payMethodHTML('onsite', I.wallet, 'Payer sur place', 'Le serveur passe avec le terminal en fin de repas') +
+          payMethodHTML('onsite', I.wallet, LIVE ? 'Payer à table' : 'Payer sur place', 'Le serveur passe avec le terminal en fin de repas') +
         '</div>' +
         '<div id="cardForm"></div>' +
-        (LIVE ? '<p class="secure">Vous réglerez directement à table, en fin de repas.</p>'
-              : '<p class="secure">' + I.lock + ' Paiement sécurisé par Stripe · Données chiffrées</p>'),
+        '<p class="secure" id="payNote"></p>',
       footer: '<button class="btn btn--primary" type="button" id="payBtn"></button>',
       onMount: function (sheet) {
         var btn = $('#payBtn', sheet);
@@ -604,8 +606,14 @@
                 '<p class="help">Mode démo : utilisez 4242 4242 4242 4242, n’importe quelle date future et un CVC.</p>' +
               '</div>'
             : '';
+          $('#payNote', sheet).innerHTML = m === 'onsite'
+            ? (LIVE ? 'Vous réglerez directement à table, en fin de repas.' : I.lock + ' Paiement sécurisé par Stripe · Données chiffrées')
+            : m === 'online'
+              ? I.lock + ' Paiement sécurisé par Stripe, encaissé directement par ' + esc(state.restaurant.name) + '. Votre commande part en cuisine dès le paiement validé.'
+              : I.lock + ' Paiement sécurisé par Stripe · Données chiffrées';
           btn.innerHTML = m === 'onsite'
             ? 'Commander · ' + fmt(s.total)
+            : m === 'online' ? I.lock.replace('<svg ', '<svg width="16" height="16" ') + ' Payer · ' + fmt(s.total)
             : m === 'applepay' ? I.apple.replace('<svg ', '<svg width="18" height="18" ') + ' Payer et commander · ' + fmt(s.total)
             : 'Payer et commander · ' + fmt(s.total);
         };
@@ -663,16 +671,8 @@
     return new Date(2000 + +m[2], +m[1], 0, 23, 59) >= new Date();
   }
 
-  /*
-   * PRODUCTION — intégration Stripe :
-   *  1. POST /api/payments/intent { restaurantId, table, lines } -> { clientSecret }
-   *     (le serveur recalcule le montant depuis la base : ne jamais faire confiance au client)
-   *  2. Carte : stripe.confirmCardPayment(clientSecret, { payment_method: { card: cardElement } })
-   *     Apple Pay / Google Pay : stripe.paymentRequest({ country: 'FR', currency: 'eur', total })
-   *       -> canMakePayment() puis paymentRequest.on('paymentmethod', ...)
-   *  3. Le webhook "payment_intent.succeeded" crée la commande et notifie la cuisine.
-   *  « Payer sur place » crée directement la commande avec payment.status = 'pending'.
-   */
+  // Mode démo uniquement : paiement simulé. En ligne, voir payOnline() plus bas
+  // (Stripe Checkout via la fonction serveur stripe-checkout).
   function simulatePayment(method) {
     return new Promise(function (resolve) {
       setTimeout(function () {
@@ -690,7 +690,10 @@
 
     var label = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> ' + (state.payMethod === 'onsite' ? 'Envoi en cuisine…' : 'Paiement sécurisé en cours…');
+    btn.innerHTML = '<span class="spinner"></span> ' + (state.payMethod === 'onsite' ? 'Envoi en cuisine…'
+      : state.payMethod === 'online' ? 'Ouverture du paiement…' : 'Paiement sécurisé en cours…');
+
+    if (LIVE && state.payMethod === 'online') return payOnline(btn, label, tableNo, s);
 
     // En ligne : le paiement se fait à table, la commande part directement.
     var pay = LIVE ? Promise.resolve({ method: 'onsite', status: 'pending' }) : simulatePayment(state.payMethod);
@@ -722,6 +725,60 @@
     });
   }
 
+  /*
+   * Paiement en ligne : la commande est enregistrée (prix recalculés en base,
+   * stock réservé) mais reste invisible en cuisine ; le client part sur la page
+   * de paiement Stripe puis revient sur menu.html?paid=<id> (ou ?cancel=<id>).
+   * Le panier n'est vidé qu'au retour, une fois le paiement accepté.
+   */
+  function payOnline(btn, label, tableNo, s) {
+    var orderId = null;
+    T.createOrder({
+      table: tableNo,
+      note: state.note,
+      pay: 'online',
+      lines: s.lines.map(function (l) { return l.built; })
+    }).then(function (order) {
+      orderId = order.id;
+      setTable(tableNo); // mémorisée pour le retour de la page de paiement
+      return T.payments.checkout(order.id);
+    }).then(function (res) {
+      if (res && res.paid) return paymentReturn(orderId, true);
+      if (!res || !res.url) throw new Error('Le paiement n’a pas pu s’ouvrir. Réessayez ou choisissez « Payer à table ».');
+      location.href = res.url;
+    }).catch(function (err) {
+      if (orderId) T.payments.cancel(orderId).catch(function () {});
+      btn.disabled = false;
+      btn.innerHTML = label;
+      UI.toast(esc((err && err.message) || 'Le paiement n’a pas pu s’ouvrir. Réessayez.'), 5000);
+      UI.vibrate(60);
+      state.menu = T.getMenu(); renderMenu(); renderCartBar();
+    });
+  }
+
+  // Retour de la page Stripe.
+  function paymentReturn(id, paid) {
+    try {
+      var q = new URLSearchParams(location.search);
+      q.delete('paid'); q.delete('cancel');
+      history.replaceState(null, '', '?' + q.toString());
+    } catch (e) { /* ignore */ }
+    if (!/^[0-9a-f-]{36}$/i.test(id || '')) return;
+    if (!paid) {
+      T.payments.cancel(id).catch(function () {});
+      UI.toast('Paiement annulé · votre panier est conservé', 4500);
+      return;
+    }
+    state.cart = []; state.note = '';
+    saveCart();
+    if (state.mine.indexOf(id) < 0) { state.mine.push(id); T.write(MINE_KEY, state.mine); }
+    UI.closeSheet();
+    renderMenu(); renderCartBar();
+    T.track(id).then(function () {
+      if (T.getOrder(id)) { UI.vibrate([20, 40, 20]); showTracking(id); }
+    });
+  }
+
   /* ======================================================================
      Suivi de commande en temps réel
      ====================================================================== */
@@ -731,7 +788,7 @@
     { id: 'prete', label: 'Prête' },
     { id: 'servie', label: 'Servie' }
   ];
-  var PAY_LABEL = { applepay: 'Apple Pay', card: 'Carte bancaire', onsite: 'Sur place' };
+  var PAY_LABEL = { applepay: 'Apple Pay', card: 'Carte bancaire', onsite: 'Sur place', online: 'en ligne' };
 
   function stepTime(order, id) {
     var h = (order.history || []).filter(function (x) { return x.status === id; })[0];
@@ -739,10 +796,14 @@
   }
 
   function trackHTML(order) {
-    var idx = order.status === 'terminee' ? CLIENT_STEPS.length : CLIENT_STEPS.map(function (s) { return s.id; }).indexOf(order.status);
-    var info = T.statusInfo(order.status);
+    var pending = order.payment.status === 'awaiting';
+    var idx = pending ? -1 : order.status === 'terminee' ? CLIENT_STEPS.length : CLIENT_STEPS.map(function (s) { return s.id; }).indexOf(order.status);
+    var info = pending
+      ? { client: 'Paiement en cours de validation', hint: 'Votre commande part en cuisine dès que le paiement est confirmé (quelques secondes).' }
+      : T.statusInfo(order.status);
     var icon = order.status === 'preparation' ? '<div class="track__icon is-cooking">' + I.chef + '</div>'
       : order.status === 'prete' ? '<div class="track__icon is-cooking">' + I.tray + '</div>'
+      : pending ? '<div class="track__icon is-cooking">' + I.lock + '</div>'
       : '<div class="track__icon">' + I.check + '</div>';
     var paid = order.payment.status === 'paid';
 
@@ -771,7 +832,7 @@
       '</div>' +
       '<div class="totals">' +
         '<div class="totals__row"><span>Paiement</span><span class="badge ' + (paid ? 'badge--ok' : 'badge--warn') + '">' +
-          (paid ? 'Payé · ' + PAY_LABEL[order.payment.method] : 'À régler sur place') + '</span></div>' +
+          (paid ? 'Payé · ' + (PAY_LABEL[order.payment.method] || 'carte') : pending ? 'Paiement en cours…' : 'À régler sur place') + '</span></div>' +
         '<div class="totals__row totals__row--grand"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
       '</div>' +
       ((order.status === 'servie' || order.status === 'terminee') && state.restaurant.reviewUrl
@@ -956,6 +1017,9 @@
     $('#welcome').addEventListener('click', function (e) {
       if (e.target.closest('[data-change-table]')) openTablePicker();
     });
+    var back = new URLSearchParams(location.search);
+    if (LIVE && (back.get('paid') || back.get('cancel'))) paymentReturn(back.get('paid') || back.get('cancel'), !!back.get('paid'));
+
     if (table && tableError(table)) { table = null; renderHeader(); }
     if (!table) {
       var saved = null;

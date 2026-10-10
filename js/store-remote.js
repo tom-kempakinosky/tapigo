@@ -29,7 +29,7 @@
   var emit = T._emit;
   var sb = null;
   var current = null; // { id, slug, role }
-  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {} };
+  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {}, onlinePayment: false };
   var pendingMenuWrites = 0;
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
@@ -84,6 +84,8 @@
     };
   }
 
+  function awaiting(o) { return o.payment && o.payment.status === 'awaiting'; }
+
   function findOrder(id) {
     return cache.orders.filter(function (o) { return o.id === id; })[0] || null;
   }
@@ -96,6 +98,7 @@
 
   function applyRestaurant(row, skipMenu) {
     cache.info = Object.assign(clone(DEFAULT_INFO), row.info || {});
+    if ('online_payment' in row) cache.onlinePayment = !!row.online_payment;
     if (!skipMenu) cache.menu = row.menu || null;
   }
 
@@ -135,13 +138,13 @@
   }
 
   function refreshRestaurant() {
-    return sb.from('restaurants').select('info, menu').eq('id', current.id).maybeSingle().then(function (r) {
+    return sb.from('restaurants').select('info, menu, online_payment').eq('id', current.id).maybeSingle().then(function (r) {
       if (r.error) throw r.error;
       if (!r.data) return;
-      var before = JSON.stringify([cache.info, cache.menu]);
+      var before = JSON.stringify([cache.info, cache.menu, cache.onlinePayment]);
       applyRestaurant(r.data);
       // Rien n'a changé (ex. simple compteur) : on ne touche pas à l'écran.
-      if (JSON.stringify([cache.info, cache.menu]) === before) return;
+      if (JSON.stringify([cache.info, cache.menu, cache.onlinePayment]) === before) return;
       emit('menu:updated', null);
       emit('restaurant:updated', clone(cache.info));
     });
@@ -161,6 +164,8 @@
   T.hasMenu = function () { return !!(cache.menu && cache.menu.items && cache.menu.items.length); };
   T.getRestaurant = function () { return clone(cache.info); };
   T.getMenu = function () { return clone(cache.menu || EMPTY_MENU); };
+  // Le restaurant propose « Payer maintenant » (compte Stripe validé + option activée).
+  T.canPayOnline = function () { return !!cache.onlinePayment; };
 
   T.saveRestaurant = function (info) {
     cache.info = Object.assign(clone(DEFAULT_INFO), info);
@@ -256,16 +261,18 @@
     var items = (payload.lines || []).filter(Boolean).map(function (l) {
       return { itemId: l.itemId, qty: l.qty, selections: l.selections || {}, note: l.note || '' };
     });
-    return sb.rpc('place_order', {
+    var args = {
       p_restaurant: current.slug,
       p_table: String(payload.table || ''),
       p_items: items,
       p_note: payload.note || ''
-    }).then(function (r) {
+    };
+    if (payload.pay === 'online') args.p_pay = 'online';
+    return sb.rpc('place_order', args).then(function (r) {
       if (r.error) throw new Error(r.error.message);
       var o = upsert(fromRow(r.data));
       // Le suivi par interrogation ne concerne que le client (l'équipe a le temps réel).
-      if (!current.role) { tracked[o.id] = o.status; ensurePolling(); }
+      if (!current.role) { tracked[o.id] = trackKey(o); ensurePolling(); }
       emit('orders:sync', null);
       return clone(o);
     });
@@ -298,7 +305,7 @@
   /* ---------------- Côté client ---------------- */
   // slug absent (ancienne plaque sans ?r=) : accepté s'il n'existe qu'un restaurant.
   T.openRestaurant = function (slug) {
-    var q = sb.from('restaurants').select('id, slug, info, menu, active');
+    var q = sb.from('restaurants').select('id, slug, info, menu, active, online_payment');
     q = slug ? q.eq('slug', slug).limit(1) : q.eq('active', true).limit(2);
     return q.then(function (r) {
       if (r.error) throw new Error('Base de données inaccessible : ' + r.error.message);
@@ -317,17 +324,25 @@
   var tracked = {};
   var pollTimer = null;
 
+  // Statut + état du paiement : le client voit aussi passer « Payé ».
+  function trackKey(o) { return o.status + '|' + (o.payment && o.payment.status); }
+
   function pollOnce(announce) {
-    var ids = Object.keys(tracked).filter(function (id) { return tracked[id] !== 'terminee'; });
+    var ids = Object.keys(tracked).filter(function (id) { return !/^terminee\|/.test(tracked[id] || ''); });
     if (!ids.length) return Promise.resolve();
     return Promise.all(ids.map(function (id) {
       return sb.rpc('get_order', { p_id: id }).then(function (r) {
         if (r.error) return;
-        if (!r.data) { delete tracked[id]; return; }
+        if (!r.data) {
+          // Paiement en ligne abandonné : la commande n'existe plus.
+          delete tracked[id];
+          cache.orders = cache.orders.filter(function (o) { return o.id !== id; });
+          return;
+        }
         var o = upsert(fromRow(r.data));
         var prev = tracked[id];
-        tracked[id] = o.status;
-        if (prev && prev !== o.status) emit('order:updated', clone(o));
+        tracked[id] = trackKey(o);
+        if (prev && prev !== tracked[id]) emit('order:updated', clone(o));
       });
     })).then(function () { if (announce) emit('orders:sync', null); });
   }
@@ -443,7 +458,7 @@
         .order('created_at', { ascending: true }).range(from, from + 999)
         .then(function (r) {
           if (r.error) throw r.error;
-          out = out.concat(r.data.map(fromRow));
+          out = out.concat(r.data.map(fromRow).filter(function (o) { return !awaiting(o); }));
           return r.data.length === 1000 && out.length < 20000 ? page(from + 1000) : out;
         });
     }
@@ -480,7 +495,7 @@
       .limit(500)
       .then(function (r) {
         if (r.error) throw r.error;
-        cache.orders = r.data.map(fromRow);
+        cache.orders = r.data.map(fromRow).filter(function (o) { return !awaiting(o); });
         emit('orders:sync', null);
       });
   }
@@ -490,7 +505,7 @@
     staffStarted = true;
     current = { id: restaurant.id, slug: restaurant.slug, role: restaurant.role };
 
-    return sb.from('restaurants').select('info, menu').eq('id', current.id).maybeSingle().then(function (r) {
+    return sb.from('restaurants').select('info, menu, online_payment').eq('id', current.id).maybeSingle().then(function (r) {
       if (r.error) throw r.error;
       if (!r.data) throw new Error('Restaurant introuvable.');
       applyRestaurant(r.data);
@@ -505,9 +520,23 @@
             emit('orders:sync', null);
             return;
           }
-          var isNew = !findOrder(p.new.id);
-          var o = upsert(fromRow(p.new));
-          emit(isNew ? 'order:created' : 'order:updated', clone(o));
+          var row = fromRow(p.new);
+          // Paiement en ligne pas encore confirmé : rien en cuisine. La
+          // commande arrivera comme « nouvelle » une fois payée.
+          if (awaiting(row)) return;
+          var prev = findOrder(p.new.id);
+          // Supabase peut omettre les colonnes volumineuses inchangées (lignes).
+          if (p.eventType === 'UPDATE' && p.new.lines == null) {
+            if (!prev) {
+              return sb.from('orders').select('*').eq('id', p.new.id).maybeSingle().then(function (r) {
+                if (r.error || !r.data || findOrder(r.data.id)) return;
+                emit('order:created', clone(upsert(fromRow(r.data))));
+              });
+            }
+            row.lines = prev.lines;
+          }
+          var o = upsert(row);
+          emit(prev ? 'order:updated' : 'order:created', clone(o));
         })
         .subscribe(function (status) {
           // Après une coupure réseau : on recharge pour ne rien manquer.
@@ -532,6 +561,62 @@
       window.addEventListener('online', resync);
       setInterval(resync, 60000);
     });
+  };
+
+  /* ---------------- Fonctions serveur (supabase/functions) ---------------- */
+  function callFunction(name, body) {
+    return Promise.resolve().then(function () {
+      return sb.functions.invoke(name, { body: body });
+    }).then(function (r) {
+      if (!r.error) return r.data;
+      var ctx = r.error.context;
+      var notDeployed = new Error('Service pas encore activé sur le serveur (fonction « ' + name + ' » à déployer, voir README).');
+      if (!ctx || typeof ctx.json !== 'function') throw notDeployed;
+      if (ctx.status === 404) throw notDeployed;
+      return ctx.json().then(function (j) { throw new Error((j && (j.error || j.message)) || 'Erreur serveur'); },
+        function () { throw new Error('Erreur serveur (' + ctx.status + ')'); });
+    });
+  }
+
+  /* ---------------- Paiement en ligne (Stripe) ---------------- */
+  T.payments = {
+    // Client : page de paiement Stripe de la commande -> { url } ou { paid: true }.
+    checkout: function (orderId) { return callFunction('stripe-checkout', { order_id: orderId }); },
+    // Client revenu sans payer : la commande est supprimée et le stock rendu.
+    cancel: function (orderId) {
+      delete tracked[orderId];
+      cache.orders = cache.orders.filter(function (o) { return o.id !== orderId; });
+      return callFunction('stripe-checkout', { order_id: orderId, action: 'cancel' });
+    },
+    // Gérant : { connected, charges_enabled, details_submitted, online_payment }.
+    status: function () { return callFunction('stripe-connect', { restaurant_id: current.id, action: 'status' }); },
+    onboard: function () { return callFunction('stripe-connect', { restaurant_id: current.id, action: 'onboard' }); },
+    setEnabled: function (on) {
+      return rpc('set_online_payment', { p_restaurant: current.id, p_enabled: !!on }).then(function () {
+        cache.onlinePayment = !!on;
+      });
+    }
+  };
+
+  /* ---------------- Prévision de stock du jour (IA) ---------------- */
+  function parisDay() {
+    return new Intl.DateTimeFormat('fr-CA', { timeZone: 'Europe/Paris' }).format(new Date());
+  }
+
+  T.forecast = {
+    get: function () {
+      return sb.from('stock_forecasts').select('*').eq('restaurant_id', current.id).eq('for_date', parisDay())
+        .maybeSingle().then(function (r) {
+          if (r.error) {
+            if (/stock_forecasts/.test(r.error.message)) return null; // schéma pas encore à jour
+            throw r.error;
+          }
+          return r.data;
+        });
+    },
+    run: function (context) {
+      return callFunction('stock-forecast', { restaurant_id: current.id, context: context || '' });
+    }
   };
 
   /* ---------------- Administration Tapigo ---------------- */

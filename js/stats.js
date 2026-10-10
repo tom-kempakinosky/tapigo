@@ -137,7 +137,7 @@
       rows.push([o.number, d.toLocaleDateString('fr-FR'), T.clock(o.createdAt), o.table,
         o.lines.map(function (l) { return l.qty + ' x ' + l.name; }).join(' / '),
         String(o.total.toFixed(2)).replace('.', ','),
-        o.payment.status === 'paid' ? 'Payé' : 'À encaisser', T.statusInfo(o.status).label]);
+        o.payment.status === 'paid' ? (o.payment.method === 'online' ? 'Payé en ligne' : 'Payé') : 'À encaisser', T.statusInfo(o.status).label]);
     });
     var csv = '﻿' + rows.map(function (r) { return r.map(q).join(';'); }).join('\r\n');
     var a = document.createElement('a');

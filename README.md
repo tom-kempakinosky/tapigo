@@ -26,7 +26,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 
 | Qui | Page | Accès |
 | --- | --- | --- |
-| Clients | `menu.html?r=<restaurant>&table=N` (plaque NFC) | Libre : voient la carte et commandent, paiement à table |
+| Clients | `menu.html?r=<restaurant>` (plaque NFC) | Libre : voient la carte et commandent, paient à table ou en ligne |
 | Restaurateurs | `kitchen.html` | E-mail et mot de passe. Chacun ne voit **que son restaurant** |
 | Équipe Tapigo | `admin.html` | Crée les restaurants et donne les accès |
 
@@ -54,7 +54,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - Numéro de table saisi à l'arrivée et vérifié, modifiable via le badge.
 - Carte par catégories personnalisables, filtres rapides, recherche, photos.
 - Fiche produit : options et suppléments, **14 allergènes réglementaires**, suggestions « Parfait avec ».
-- Panier avec notes pour la cuisine, commande payée à table ; paiement en ligne prévu en option.
+- Panier avec notes pour la cuisine. **Payer à table** (terminal du restaurant) ou, si le restaurant l'active, **Payer maintenant** depuis le téléphone (carte, Apple Pay, Google Pay via Stripe). La commande part en cuisine dès le paiement validé.
 - **Bouton Service** : « Appeler un serveur » ou « Demander l'addition ».
 - Suivi en temps réel (Envoyée → En préparation → Prête → Servie), puis invitation à laisser un **avis Google**.
 - Bandeau « Commandes en pause » quand le restaurant suspend les commandes.
@@ -69,6 +69,8 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - **Statistiques** : chiffre d'affaires par jour, affluence par heure, plats les plus vendus, panier moyen, temps de préparation, part cuisine / bar, export CSV.
 - **Prise de commande en salle** (tous les rôles) : le serveur choisit la table, ajoute les plats et leurs options, note pour la cuisine, puis envoie. Commande marquée « Prise en salle », non bloquée par la pause ni par l'anti-abus, stocks vérifiés.
 - **Stocks** (toute l'équipe, gérant ou non) : quantités restantes décomptées à chaque commande, plat retiré de la carte à 0, « Plus que N » côté client, mise en rupture / remise en vente, alerte « épuisé » en cuisine.
+- **Prévision IA du stock** : chaque matin, Claude analyse les ventes des 8 dernières semaines (même jour, tendance, contexte saisi par l'équipe) et propose la quantité à prévoir par produit, avec une explication. L'équipe applique chaque suggestion ou tout d'un coup ; rien ne change sans validation.
+- **Paiement en ligne** (gérant, dans Établissement) : connexion du compte Stripe du restaurant et activation de « Payer maintenant ». Aucune commission Tapigo.
 - Rôles : Gérant (tout) / Équipe (commandes et stocks ; ni prix, ni carte, ni statistiques).
 
 **Tapigo** (`admin.html`)
@@ -86,7 +88,11 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 ├── menu.html           Interface client
 ├── kitchen.html        Dashboard cuisine & bar
 ├── admin.html          Administration Tapigo (restaurants, accès)
-├── supabase/schema.sql  Base de données, droits et fonctions (mode en ligne)
+├── supabase/
+│   ├── schema.sql      Base de données, droits et fonctions (mode en ligne)
+│   ├── cron.sql        Prévision de stock automatique chaque matin
+│   └── functions/      Fonctions serveur : stripe-connect, stripe-checkout,
+│                       stripe-webhook, stock-forecast (Claude)
 ├── css/tapigo.css      Charte « Chic & Élégant » (tokens, composants, responsive)
 └── js/
     ├── data.js         Données de démonstration (restaurant, catégories, plats, options)
@@ -102,17 +108,33 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 
 `store.js` est le **seul** module qui touche aux données. En démo, il s’appuie sur `localStorage` et `BroadcastChannel`. Pour passer en production, il suffit de réimplémenter son API (`getMenu`, `saveItem`, `createOrder`, `updateOrderStatus`, `subscribe`…) au-dessus de Supabase, de Firebase ou d’une API REST + WebSocket. Les correspondances sont détaillées en tête du fichier.
 
-### Brancher Stripe
+### Fonctions serveur (paiement en ligne et prévision IA)
 
-La fonction `simulatePayment()` de `js/menu.js` est le point d’intégration (voir le commentaire au-dessus) :
-1. Le serveur crée un `PaymentIntent` en **recalculant le montant depuis la base de données**.
-2. Pour la carte, appeler `stripe.confirmCardPayment(clientSecret, …)` avec un Card Element. Pour Apple Pay / Google Pay, utiliser `stripe.paymentRequest(…)` puis `canMakePayment()`.
-3. Le webhook `payment_intent.succeeded` crée la commande et notifie la cuisine.
+Ces deux options reposent sur des **Supabase Edge Functions** (`supabase/functions/`), qui gardent les clés secrètes côté serveur. Le site fonctionne sans elles : paiement à table uniquement et pas de prévision.
+
+1. **Base** : relancez `supabase/schema.sql` dans SQL Editor.
+2. **Secrets** (Supabase → Edge Functions → Secrets) :
+
+   | Secret | Valeur |
+   | --- | --- |
+   | `STRIPE_SECRET_KEY` | Clé secrète Stripe de Tapigo (`sk_live_…`, ou `sk_test_…` pour tester) |
+   | `STRIPE_WEBHOOK_SECRET` | `whsec_…` donné par Stripe à l'étape 4 |
+   | `ANTHROPIC_API_KEY` | Clé de l'API Claude (console.anthropic.com) |
+   | `CRON_SECRET` | Un mot de passe long, au hasard |
+   | `SITE_URL` | `https://tom-kempakinosky.github.io/tapigo` |
+
+3. **Déploiement** : ajoutez le secret GitHub `SUPABASE_ACCESS_TOKEN` (Supabase → Account → Access Tokens) puis lancez l'action **Fonctions Supabase** (onglet Actions). Elle se relance seule à chaque modification de `supabase/functions/`. Sans GitHub : `npx supabase functions deploy --no-verify-jwt --project-ref <ref>`.
+4. **Stripe** : activez **Connect** sur le compte Stripe de Tapigo, puis dans Développeurs → Webhooks, ajoutez l'adresse `https://<ref>.supabase.co/functions/v1/stripe-webhook` en cochant **« Événements sur les comptes connectés »**, avec les événements `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired` et `account.updated`.
+5. **Prévision chaque matin** : exécutez `supabase/cron.sql` dans SQL Editor (en y mettant votre `CRON_SECRET`).
+
+**Paiement en ligne, comment ça marche.** Chaque restaurant connecte son propre compte Stripe (*Standard*) depuis Établissement. Le client choisit « Payer maintenant » : la commande est créée (prix recalculés, stock réservé) mais reste invisible en cuisine ; il paie sur la page sécurisée de Stripe ; le webhook confirme le paiement et la commande arrive en cuisine marquée « Payé · en ligne ». Paiement abandonné : la commande est supprimée et le stock rendu. L'argent va directement au restaurant ; Tapigo ne prend aucune commission.
+
+**Prévision IA.** La fonction `stock-forecast` calcule une base statistique (moyenne pondérée des mêmes jours de semaine + 15 %), puis demande à Claude (`claude-opus-5-5`, sortie JSON structurée) de l'ajuster et de l'expliquer. Les requêtes refusées par le modèle sont relancées automatiquement sur le modèle de secours recommandé par Anthropic (`fallbacks: "default"`). Sans clé `ANTHROPIC_API_KEY` ou en cas d'erreur, la base statistique est enregistrée seule. Coût : un appel par restaurant et par jour, plus les recalculs manuels (limités à un par minute).
 
 ### Programmer les tags NFC
 
-Écrivez sur chaque tag (NTAG213/215) un enregistrement URL du type
-`https://votre-domaine.fr/menu.html?table=12`.
+Écrivez sur toutes les plaques (NTAG213/215) du restaurant le même enregistrement URL, copié depuis `admin.html` :
+`https://tom-kempakinosky.github.io/tapigo/menu.html?r=<restaurant>`. Le client indique son numéro de table.
 
 ## Charte
 

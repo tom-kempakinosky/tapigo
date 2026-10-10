@@ -30,7 +30,8 @@
     orders: NS + 'orders',
     seq: NS + 'seq',
     requests: NS + 'requests',
-    stock: NS + 'stock'
+    stock: NS + 'stock',
+    forecast: NS + 'forecast'
   };
 
   var memory = {};
@@ -359,6 +360,69 @@
     return Promise.resolve(getOrders().filter(function (o) { return o.createdAt >= since; }));
   }
 
+  // Prévision de stock du jour. En démo : base statistique calculée ici
+  // (en ligne, la fonction serveur stock-forecast y ajoute l'analyse de Claude).
+  var DAYS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+  function dayKey(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+  }
+  function computeForecast(context) {
+    var today = dayKey(Date.now());
+    var wd = new Date().getDay();
+    var sold = {}, open = {};
+    getOrders().forEach(function (o) {
+      var k = dayKey(o.createdAt);
+      if (k >= today || Date.now() - o.createdAt > 57 * 864e5) return;
+      open[k] = new Date(o.createdAt).getDay();
+      o.lines.forEach(function (l) {
+        sold[l.itemId] = sold[l.itemId] || {};
+        sold[l.itemId][k] = (sold[l.itemId][k] || 0) + l.qty;
+      });
+    });
+    var days = Object.keys(open).sort();
+    var same = days.filter(function (k) { return open[k] === wd; }).slice(-8);
+    var recent = days.slice(-14);
+    var items = [];
+    getMenu().items.forEach(function (it) {
+      var s = sold[it.id];
+      if (!s) return;
+      var avg, reason;
+      if (same.length >= 2) {
+        var w = 0, sum = 0;
+        same.forEach(function (k, i) { sum += (s[k] || 0) * (i + 1); w += i + 1; });
+        avg = sum / w;
+        reason = 'Moyenne des ' + same.length + ' derniers ' + DAYS[wd] + 's';
+      } else {
+        avg = recent.reduce(function (a, k) { return a + (s[k] || 0); }, 0) / Math.max(1, recent.length);
+        reason = 'Moyenne des ' + recent.length + ' derniers jours d’ouverture';
+      }
+      if (avg > 0) items.push({ itemId: it.id, quantity: Math.ceil(avg * 1.15), reason: reason + ' (' + avg.toFixed(1).replace('.', ',') + ') + 15 % de marge' });
+    });
+    var f = {
+      for_date: today,
+      items: items,
+      summary: days.length
+        ? 'Prévision statistique pour ce ' + DAYS[wd] + ', basée sur ' + days.length + ' jours de ventes. En ligne, l’IA affine ces quantités et les explique.'
+        : 'Pas encore assez de ventes pour une prévision. En démo, générez des commandes fictives depuis l’onglet Statistiques.',
+      alerts: [],
+      context: String(context || '').slice(0, 300),
+      source: 'statistique',
+      created_at: new Date().toISOString()
+    };
+    write(K.forecast, f);
+    return f;
+  }
+  var forecast = {
+    get: function () {
+      var f = read(K.forecast, null);
+      return Promise.resolve(f && f.for_date === dayKey(Date.now()) ? f : null);
+    },
+    run: function (context) {
+      return new Promise(function (resolve) { setTimeout(function () { resolve(computeForecast(context)); }, 500); });
+    }
+  };
+
   // En démo, la photo est gardée dans le navigateur (image réduite).
   function uploadPhoto(file) {
     return window.TapigoUI.compressImage(file, 640, 0.75).then(function (blob) {
@@ -492,6 +556,8 @@
     closeTable: closeTable,
     setOrdersPaused: setOrdersPaused,
     loadStats: loadStats,
+    forecast: forecast,
+    canPayOnline: function () { return false; },
     uploadPhoto: uploadPhoto,
     seedDemoOrders: seedDemoOrders,
     clearDemoOrders: clearDemoOrders,
