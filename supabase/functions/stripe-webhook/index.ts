@@ -29,10 +29,13 @@ Deno.serve(async (req) => {
   const orderFor = async () => {
     const id = (obj.client_reference_id || (obj.metadata as Record<string, string> | undefined)?.order_id) as string | undefined;
     if (!id) return null;
-    const { data: order } = await db.from("orders").select("id, restaurant_id, total, tip, payment").eq("id", id).maybeSingle();
+    // Erreur de base : on la remonte (réponse 500) pour que Stripe renvoie l'événement.
+    const { data: order, error } = await db.from("orders").select("id, restaurant_id, total, tip, payment").eq("id", id).maybeSingle();
+    if (error) throw error;
     if (!order) return null;
-    const { data: pay } = await db.from("restaurant_payments").select("stripe_account_id")
+    const { data: pay, error: payError } = await db.from("restaurant_payments").select("stripe_account_id")
       .eq("restaurant_id", order.restaurant_id).maybeSingle();
+    if (payError) throw payError;
     if (!pay || pay.stripe_account_id !== event.account) {
       console.error("Compte Stripe inattendu", event.account, "pour la commande", id);
       return null;

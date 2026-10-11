@@ -837,6 +837,20 @@
     renderMenu(); renderCartBar();
     T.track(id).then(function () {
       if (T.getOrder(id)) { UI.vibrate([20, 40, 20]); showTracking(id); }
+      confirmPayment(id, 0);
+    });
+  }
+
+  // Filet de sécurité : si la confirmation de Stripe tarde, on interroge
+  // Stripe directement (immédiatement, puis après 4 s et 12 s).
+  function confirmPayment(id, attempt) {
+    var o = T.getOrder(id);
+    if (!o || o.payment.status !== 'awaiting' || !T.payments || !T.payments.sync) return;
+    T.payments.sync(id).catch(function () { return null; }).then(function (r) {
+      return T.track(id).then(function () {
+        if (r && r.cancelled) UI.toast('Paiement non abouti : la commande a été annulée. Votre carte n’a pas été débitée.', 6000);
+        if (!(r && (r.paid || r.cancelled)) && attempt < 2) setTimeout(function () { confirmPayment(id, attempt + 1); }, attempt ? 8000 : 4000);
+      });
     });
   }
 
@@ -860,7 +874,7 @@
     var pending = order.payment.status === 'awaiting';
     var idx = pending ? -1 : order.status === 'terminee' ? CLIENT_STEPS.length : CLIENT_STEPS.map(function (s) { return s.id; }).indexOf(order.status);
     var info = pending
-      ? { client: 'Paiement en cours de validation', hint: 'Votre commande part en cuisine dès que le paiement est confirmé (quelques secondes).' }
+      ? { client: 'Paiement en cours de validation', hint: 'Votre commande part en cuisine dès que le paiement est confirmé (quelques secondes).', pending: true }
       : T.statusInfo(order.status);
     var icon = order.status === 'preparation' ? '<div class="track__icon is-cooking">' + I.chef + '</div>'
       : order.status === 'prete' ? '<div class="track__icon is-cooking">' + I.tray + '</div>'
@@ -876,6 +890,7 @@
       '<div class="track__hero">' + icon +
         '<p class="eyebrow">Commande n° ' + order.number + ' · ' + T.clock(order.createdAt) + '</p>' +
         '<h2>' + esc(info.client) + '</h2><p>' + esc(info.hint) + '</p>' +
+        (info.pending ? '<p><button class="btn btn--ghost btn--sm" type="button" data-check-pay="' + esc(order.id) + '">Vérifier le paiement</button></p>' : '') +
         (T.getTableServer && T.getTableServer(order.table) ? '<p class="track__server">Votre serveur : <strong>' + esc(T.getTableServer(order.table)) + '</strong></p>' : '') +
       '</div>' +
       '<ol class="steps">' + CLIENT_STEPS.map(function (s, i) {
@@ -912,11 +927,18 @@
    * Google après quelques secondes (annulable). Une seule fois par visite.
    */
   var REVIEW_DELAY = 6;
+  var REVIEW_KEY = 'tapigo.v1.reviewed.' + scope;
+  var reviewAsked = false;
   function askReview(order) {
     var url = safeUrl(state.restaurant.reviewUrl);
     if (url === '#') return;
-    var key = 'tapigo.v1.review.' + scope;
-    try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, order.id); } catch (e) { /* ignore */ }
+    // Une seule fois par commande (même si la page est rouverte), et une
+    // seule fenêtre par visite.
+    if (reviewAsked) return;
+    var done = T.read(REVIEW_KEY, []);
+    if (done.indexOf(order.id) >= 0) return;
+    reviewAsked = true;
+    T.write(REVIEW_KEY, done.concat(order.id).slice(-30));
     var left = REVIEW_DELAY, timer = null;
     UI.closeSheet().then(function () {
       UI.openSheet({
@@ -1063,6 +1085,8 @@
     $('#trackPill').addEventListener('click', openOrdersList);
     $('#trackRoot').addEventListener('click', function (e) {
       if (e.target.closest('[data-close-track]')) hideTracking();
+      var chk = e.target.closest('[data-check-pay]');
+      if (chk) { chk.disabled = true; chk.textContent = 'Vérification…'; confirmPayment(chk.dataset.checkPay, 2); }
     });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && state.trackingId) hideTracking();
@@ -1091,6 +1115,12 @@
         if (tr) $('#trackRoot .track').innerHTML = trackHTML(tr);
       }
       if (msg.type === 'orders:sync') {
+        // Commande terminée pendant que la page était fermée (moins de 20 min).
+        state.mine.forEach(function (id) {
+          var done = T.getOrder(id);
+          var at = done && done.status === 'terminee' && (done.history || []).filter(function (h) { return h.status === 'terminee'; }).pop();
+          if (at && Date.now() - at.at < 20 * 60000) askReview(done);
+        });
         var cur = state.trackingId && T.getOrder(state.trackingId);
         if (cur) $('#trackRoot .track').innerHTML = trackHTML(cur);
         renderTrackPill();

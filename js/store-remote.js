@@ -29,7 +29,7 @@
   var emit = T._emit;
   var sb = null;
   var current = null; // { id, slug, role }
-  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {}, servers: {}, onlinePayment: false };
+  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {}, servers: {}, awaiting: [], onlinePayment: false };
   var pendingMenuWrites = 0;
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
@@ -539,7 +539,9 @@
       .limit(500)
       .then(function (r) {
         if (r.error) throw r.error;
-        cache.orders = r.data.map(fromRow).filter(function (o) { return !awaiting(o); });
+        var rows = r.data.map(fromRow);
+        cache.orders = rows.filter(function (o) { return !awaiting(o); });
+        cache.awaiting = rows.filter(awaiting);
         emit('orders:sync', null);
       });
   }
@@ -562,13 +564,20 @@
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: 'restaurant_id=eq.' + current.id }, function (p) {
           if (p.eventType === 'DELETE') {
             cache.orders = cache.orders.filter(function (o) { return !p.old || o.id !== p.old.id; });
+            cache.awaiting = cache.awaiting.filter(function (o) { return !p.old || o.id !== p.old.id; });
             emit('orders:sync', null);
             return;
           }
           var row = fromRow(p.new);
-          // Paiement en ligne pas encore confirmé : rien en cuisine. La
-          // commande arrivera comme « nouvelle » une fois payée.
-          if (awaiting(row)) return;
+          // Paiement en ligne pas encore confirmé : pas de ticket en cuisine,
+          // seulement la mention « paiement en cours ». La commande arrivera
+          // comme « nouvelle » une fois payée.
+          cache.awaiting = cache.awaiting.filter(function (o) { return o.id !== row.id; });
+          if (awaiting(row)) {
+            cache.awaiting.push(row);
+            emit('orders:sync', null);
+            return;
+          }
           var prev = findOrder(p.new.id);
           // Supabase peut omettre les colonnes volumineuses inchangées (lignes).
           if (p.eventType === 'UPDATE' && p.new.lines == null) {
@@ -627,6 +636,11 @@
   T.payments = {
     // Client : page de paiement Stripe de la commande -> { url } ou { paid: true }.
     checkout: function (orderId) { return callFunction('stripe-checkout', { order_id: orderId }); },
+    // Relit l'état du paiement chez Stripe (si la notification de Stripe s'est
+    // perdue) : { paid } | { cancelled } | { pending }.
+    sync: function (orderId) { return callFunction('stripe-checkout', { order_id: orderId, action: 'sync' }); },
+    // Équipe : commandes payées en ligne dont le paiement n'est pas encore confirmé.
+    awaiting: function () { return clone(cache.awaiting); },
     // Client revenu sans payer : la commande est supprimée et le stock rendu.
     cancel: function (orderId) {
       delete tracked[orderId];

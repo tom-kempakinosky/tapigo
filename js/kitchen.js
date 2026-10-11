@@ -111,6 +111,20 @@
     }).join('') + '</div>';
   }
 
+  // Paiements en ligne pas encore confirmés par Stripe (pas encore en cuisine).
+  function awaitingHTML() {
+    var list = T.payments && T.payments.awaiting ? T.payments.awaiting() : [];
+    if (!list.length) return '';
+    return '<div class="requests" role="region" aria-label="Paiements en cours">' + list.map(function (o) {
+      return '<div class="request request--pay">' +
+        '<span class="request__icon" aria-hidden="true">💳</span>' +
+        '<span class="request__text"><strong>Table ' + esc(o.table) + '</strong> paie en ligne · ' + fmt(o.total + (o.tip || 0)) +
+          '<small>commande n° ' + o.number + ' · il y a ' + T.minutesSince(o.createdAt) + ' min · arrive en cuisine dès le paiement validé</small></span>' +
+        '<button class="btn btn--ghost btn--sm" type="button" data-check-pay="' + esc(o.id) + '">Vérifier</button>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+
   function requestsHTML() {
     var list = T.getServiceRequests();
     if (!list.length) return '';
@@ -129,7 +143,7 @@
   function renderOrders() {
     var all = activeOrders();
     var shown = all.filter(forStation);
-    var html = requestsHTML() + statsHTML(all) +
+    var html = requestsHTML() + awaitingHTML() + statsHTML(all) +
       '<div class="k-filters">' +
         '<button class="btn btn--primary btn--sm" type="button" data-new-order>+ Prendre une commande</button>' +
         '<button class="btn btn--ghost btn--sm" type="button" data-servers>Serveurs des tables</button>' +
@@ -726,10 +740,22 @@
   }
 
   // Rappel sonore tant qu'une commande ou un appel n'a pas été traité.
+  // Rappel sonore toutes les 30 s pour ce qui attend encore (15 min au plus),
+  // avec la raison affichée : une commande pas encore ouverte, un appel de table.
+  var REMIND_FOR = 15 * 60000;
   function remind() {
     if (!state.sound || document.hidden) return;
-    var unseen = T.getOrders().some(function (o) { return !o.seen && o.status !== 'terminee'; });
-    if (unseen || T.getServiceRequests().length) UI.chime();
+    var unseen = T.getOrders().filter(function (o) {
+      return !o.seen && o.status === 'nouvelle' && Date.now() - o.createdAt < REMIND_FOR;
+    });
+    var calls = T.getServiceRequests().filter(function (q) { return Date.now() - Date.parse(q.created_at) < REMIND_FOR; });
+    if (!unseen.length && !calls.length) return;
+    UI.chime();
+    var parts = [];
+    if (unseen.length) parts.push(unseen.length + ' commande' + (unseen.length > 1 ? 's' : '') + ' pas encore ouverte' + (unseen.length > 1 ? 's' : '') +
+      ' (table ' + unseen.map(function (o) { return esc(o.table); }).join(', ') + ')');
+    if (calls.length) parts.push(calls.length + ' appel' + (calls.length > 1 ? 's' : '') + ' de table en attente');
+    UI.toast('⏰ <strong>Rappel</strong> · ' + parts.join(' · ') + '<br><small>Touchez la commande ou « C’est fait » pour arrêter le rappel.</small>', 5000);
   }
 
   // Empêche la tablette de se mettre en veille pendant le service.
@@ -1250,6 +1276,15 @@
       if ((t = e.target.closest('[data-reopen]'))) return T.updateOrderStatus(t.dataset.reopen, 'servie');
       if ((t = e.target.closest('[data-new-order]'))) return openOrderPad(t.dataset.newOrder || '');
       if ((t = e.target.closest('[data-servers]'))) return openServers(t.dataset.servers || '');
+      if ((t = e.target.closest('[data-check-pay]'))) {
+        t.disabled = true; t.textContent = 'Vérification…';
+        return T.payments.sync(t.dataset.checkPay).then(function (r) {
+          UI.toast(r.paid ? 'Paiement confirmé : la commande arrive en cuisine'
+            : r.cancelled ? 'Paiement non abouti : commande annulée, stock rendu'
+            : 'Le client n’a pas encore payé (page de paiement ouverte)', 5000);
+          renderOrders();
+        }, function (err) { UI.toast(esc(err.message), 5000); renderOrders(); });
+      }
       if ((t = e.target.closest('[data-request-done]'))) { T.completeServiceRequest(t.dataset.requestDone); return renderOrders(); }
       if ((t = e.target.closest('[data-close-table]'))) {
         var tb = t.dataset.closeTable;

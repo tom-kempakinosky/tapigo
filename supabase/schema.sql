@@ -291,10 +291,13 @@ begin
     raise exception 'Moyen de paiement invalide';
   end if;
 
-  -- Paiements en ligne abandonnés depuis plus d'une heure : stock libéré.
+  -- Paiements en ligne abandonnés : stock libéré. Une page de paiement Stripe
+  -- a pu être payée sans que la notification n'arrive : on lui laisse 24 h
+  -- (l'équipe peut vérifier depuis le dashboard).
   perform public.release_awaiting_order(o.id) from public.orders o
   where o.restaurant_id = v_rid and o.payment ->> 'status' = 'awaiting'
-    and o.created_at < now() - interval '1 hour';
+    and (o.created_at < now() - interval '24 hours'
+         or (o.payment ->> 'session' is null and o.created_at < now() - interval '1 hour'));
 
   p_table := left(regexp_replace(coalesce(p_table, ''), '[^0-9A-Za-z-]', '', 'g'), 6);
   if p_table = '' then

@@ -5,6 +5,9 @@
 // POST { order_id, action: "cancel" }  -> le client est revenu sans payer :
 //                                         la page Stripe est fermée, la
 //                                         commande supprimée et le stock rendu.
+// POST { order_id, action: "sync" }    -> relit le paiement chez Stripe et
+//                                         confirme la commande si elle est payée
+//                                         (filet de sécurité si le webhook est perdu).
 //
 // La commande a été créée par place_order(..., 'online') : prix recalculés en
 // base, invisible en cuisine tant que Stripe n'a pas confirmé le paiement
@@ -24,6 +27,9 @@ interface Session {
   id: string;
   url: string | null;
   status: "open" | "complete" | "expired";
+  payment_status?: string;
+  amount_total?: number;
+  payment_intent?: string | null;
 }
 
 serve(async (req) => {
@@ -45,6 +51,24 @@ serve(async (req) => {
     .eq("restaurant_id", order.restaurant_id).maybeSingle();
   const account = pay?.stripe_account_id as string | undefined;
   const sessionId = order.payment?.session as string | undefined;
+
+  if (action === "sync") {
+    if (!sessionId || !account) return json({ pending: true });
+    const s = await stripe<Session>(`checkout/sessions/${sessionId}`, null, { account });
+    if (s.status === "complete" && s.payment_status === "paid") {
+      if (s.amount_total !== Math.round((Number(order.total) + Number(order.tip || 0)) * 100)) {
+        throw new HttpError(409, "Montant payé inattendu : vérifiez ce paiement dans Stripe.");
+      }
+      const { error } = await db.rpc("payment_confirmed", { p_id: order_id, p_ref: String(s.payment_intent || s.id) });
+      if (error) throw error;
+      return json({ paid: true });
+    }
+    if (s.status === "expired") {
+      await db.rpc("release_awaiting_order", { p_id: order_id });
+      return json({ cancelled: true });
+    }
+    return json({ pending: true });
+  }
 
   if (action === "cancel") {
     if (sessionId && account) {

@@ -836,3 +836,4 @@ button.table-badge:active { transform: scale(.96); }
 #srvKnown { margin: 8px 0 0; padding: 0; }
 .check-line { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; line-height: 1.4; cursor: pointer; }
 .check-line input { margin-top: 2px; width: 18px; height: 18px; accent-color: var(--matte); flex: none; }
+.request--pay { border-left-color: var(--info); animation: ticketIn .4s var(--ease); }
