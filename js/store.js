@@ -31,7 +31,8 @@
     seq: NS + 'seq',
     requests: NS + 'requests',
     stock: NS + 'stock',
-    forecast: NS + 'forecast'
+    forecast: NS + 'forecast',
+    servers: NS + 'servers'
   };
 
   var memory = {};
@@ -255,6 +256,18 @@
     return Promise.resolve();
   }
 
+  // Serveur attitré de chaque table : { '4': 'Marco' }.
+  function getTableServers() { return read(K.servers, {}); }
+  function getTableServer(table) { return getTableServers()[String(table)] || ''; }
+  function setTableServers(tables, name) {
+    var m = getTableServers();
+    name = String(name || '').trim().slice(0, 40);
+    tables.forEach(function (t) { if (name) m[String(t)] = name; else delete m[String(t)]; });
+    write(K.servers, m);
+    emit('servers:updated', null);
+    return Promise.resolve();
+  }
+
   function createOrder(payload, opts) {
     var lines = (payload.lines || []).filter(Boolean);
     // Stocks : vérifiés puis décrémentés.
@@ -284,6 +297,7 @@
       note: payload.note || '',
       payment: payload.payment || { method: 'onsite', status: 'pending' },
       total: Math.round(total * 100) / 100,
+      tip: Math.max(0, Math.round((Number(payload.tip) || 0) * 100) / 100),
       status: 'nouvelle',
       createdAt: now,
       history: [{ status: 'nouvelle', at: now }],
@@ -557,6 +571,9 @@
     setOrdersPaused: setOrdersPaused,
     loadStats: loadStats,
     forecast: forecast,
+    getTableServers: getTableServers,
+    getTableServer: getTableServer,
+    setTableServers: setTableServers,
     canPayOnline: function () { return false; },
     uploadPhoto: uploadPhoto,
     seedDemoOrders: seedDemoOrders,

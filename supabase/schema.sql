@@ -117,6 +117,8 @@ create index if not exists orders_restaurant_created_idx on public.orders (resta
 
 -- Origine de la commande : le client (plaque NFC) ou un serveur (dashboard).
 alter table public.orders add column if not exists source text not null default 'client';
+-- Pourboire (paiement en ligne), en plus du total de la commande.
+alter table public.orders add column if not exists tip numeric(10, 2) not null default 0;
 alter table public.orders add column if not exists taken_by uuid references auth.users (id) on delete set null;
 do $$
 begin
@@ -230,7 +232,8 @@ $$;
 -- Les prix sont recalculés ici, à partir de la carte en base :
 -- un client ne peut pas modifier le montant de sa commande.
 drop function if exists public.place_order(text, text, jsonb, text);
-create or replace function public.place_order(p_restaurant text, p_table text, p_items jsonb, p_note text default '', p_pay text default 'onsite')
+drop function if exists public.place_order(text, text, jsonb, text, text);
+create or replace function public.place_order(p_restaurant text, p_table text, p_items jsonb, p_note text default '', p_pay text default 'onsite', p_tip numeric default 0)
 returns jsonb
 language plpgsql security definer set search_path = public
 as $$
@@ -260,6 +263,7 @@ declare
   v_name    text;
   v_online  boolean;
   v_payment jsonb := '{"method": "onsite", "status": "pending"}'::jsonb;
+  v_tip     numeric := 0;
 begin
   select id, menu, info, online_payment into v_rid, v_menu, v_info, v_online
   from public.restaurants where slug = p_restaurant and active;
@@ -408,8 +412,20 @@ begin
   where r.id = v_rid
   group by r.next_number;
 
-  insert into public.orders (restaurant_id, number, table_label, lines, note, payment, total, source, taken_by)
-  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), v_payment, round(v_total, 2),
+  -- Pourboire : uniquement avec le paiement en ligne (à table, il se laisse
+  -- sur le terminal). Plafonné au montant de la commande.
+  if coalesce(p_tip, 0) <> 0 then
+    if coalesce(p_pay, 'onsite') <> 'online' then
+      raise exception 'Le pourboire se règle avec le paiement en ligne';
+    end if;
+    v_tip := round(p_tip, 2);
+    if v_tip < 0 or v_tip > greatest(round(v_total, 2), 1) then
+      raise exception 'Montant du pourboire invalide';
+    end if;
+  end if;
+
+  insert into public.orders (restaurant_id, number, table_label, lines, note, payment, total, tip, source, taken_by)
+  values (v_rid, v_number, p_table, v_lines, left(coalesce(p_note, ''), 200), v_payment, round(v_total, 2), v_tip,
           case when v_staff then 'serveur' else 'client' end,
           case when v_staff then auth.uid() end)
   returning * into v_order;
@@ -888,8 +904,43 @@ revoke all on public.stock_forecasts from anon;
 revoke insert, update, delete on public.stock_forecasts from authenticated;
 grant select on public.stock_forecasts to authenticated;
 
+-- ---------- Serveur attitré de chaque table ----------
+-- Affiché au client (« Votre serveur : Marco »). Modifiable par toute l'équipe.
+create table if not exists public.table_servers (
+  restaurant_id uuid not null references public.restaurants (id) on delete cascade,
+  table_label   text not null,
+  server_name   text not null default '' check (length(server_name) <= 40), -- '' = aucun
+  updated_at    timestamptz not null default now(),
+  primary key (restaurant_id, table_label)
+);
+alter table public.table_servers enable row level security;
+drop policy if exists "Serveurs visibles par tous" on public.table_servers;
+create policy "Serveurs visibles par tous" on public.table_servers for select using (true);
+revoke insert, update, delete on public.table_servers from anon, authenticated;
+grant select on public.table_servers to anon, authenticated;
+
+-- p_tables : liste de tables ; p_name vide = plus de serveur attitré
+-- (ligne conservée avec un nom vide : le temps réel ne diffuse pas les suppressions filtrées).
+create or replace function public.set_table_servers(p_restaurant uuid, p_tables text[], p_name text)
+returns int
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_name  text := btrim(coalesce(p_name, ''));
+  v_count int;
+begin
+  if public.member_role(p_restaurant) is null then raise exception 'Accès refusé'; end if;
+  if coalesce(array_length(p_tables, 1), 0) > 300 then raise exception 'Trop de tables'; end if;
+  insert into public.table_servers (restaurant_id, table_label, server_name)
+  select p_restaurant, left(t, 6), left(coalesce(v_name, ''), 40) from unnest(p_tables) t where btrim(t) <> ''
+  on conflict (restaurant_id, table_label) do update set server_name = excluded.server_name, updated_at = now();
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
 -- ---------- Droits d'exécution ----------
-revoke all on function public.place_order(text, text, jsonb, text, text) from public;
+revoke all on function public.place_order(text, text, jsonb, text, text, numeric) from public;
 revoke all on function public.get_order(uuid) from public;
 revoke all on function public.set_order_status(uuid, text) from public;
 revoke all on function public.my_restaurants() from public;
@@ -899,7 +950,7 @@ revoke all on function public.admin_list_members(uuid) from public;
 revoke all on function public.admin_add_member(uuid, text, text) from public;
 revoke all on function public.admin_remove_member(uuid, uuid) from public;
 
-grant execute on function public.place_order(text, text, jsonb, text, text) to anon, authenticated;
+grant execute on function public.place_order(text, text, jsonb, text, text, numeric) to anon, authenticated;
 grant execute on function public.get_order(uuid) to anon, authenticated;
 grant execute on function public.is_admin() to anon, authenticated;
 grant execute on function public.member_role(uuid) to anon, authenticated;
@@ -930,6 +981,8 @@ revoke all on function public.set_online_payment(uuid, boolean) from public;
 grant execute on function public.release_awaiting_order(uuid) to service_role;
 grant execute on function public.payment_confirmed(uuid, text) to service_role;
 grant execute on function public.set_online_payment(uuid, boolean) to authenticated;
+revoke all on function public.set_table_servers(uuid, text[], text) from public;
+grant execute on function public.set_table_servers(uuid, text[], text) to authenticated;
 
 -- ---------- Temps réel ----------
 do $$
@@ -953,6 +1006,12 @@ end $$;
 do $$
 begin
   alter publication supabase_realtime add table public.item_stock;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.table_servers;
 exception when duplicate_object then null;
 end $$;
 

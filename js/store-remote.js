@@ -29,7 +29,7 @@
   var emit = T._emit;
   var sb = null;
   var current = null; // { id, slug, role }
-  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {}, onlinePayment: false };
+  var cache = { info: clone(DEFAULT_INFO), menu: null, orders: [], requests: [], stock: {}, servers: {}, onlinePayment: false };
   var pendingMenuWrites = 0;
 
   function clone(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
@@ -87,6 +87,7 @@
       note: r.note || '',
       payment: r.payment || { method: 'onsite', status: 'pending' },
       total: Number(r.total) || 0,
+      tip: Number(r.tip) || 0,
       status: r.status,
       createdAt: ts(r.created_at),
       history: (r.history || []).map(function (h) { return { status: h.status, at: ts(h.at) }; }),
@@ -261,6 +262,36 @@
       .subscribe(function (status) { if (status === 'SUBSCRIBED') loadStock().catch(function () {}); });
   }
 
+  /* ---------------- Serveur attitré des tables ---------------- */
+  T.getTableServers = function () { return clone(cache.servers); };
+  T.getTableServer = function (table) { return cache.servers[String(table)] || ''; };
+
+  T.setTableServers = function (tables, name) {
+    name = String(name || '').trim().slice(0, 40);
+    tables = tables.map(String);
+    tables.forEach(function (t) { if (name) cache.servers[t] = name; else delete cache.servers[t]; });
+    emit('servers:updated', null);
+    return sb.rpc('set_table_servers', { p_restaurant: current.id, p_tables: tables, p_name: name })
+      .then(function (r) { if (r.error) { fail(r.error); loadServers(); } });
+  };
+
+  function loadServers() {
+    return sb.from('table_servers').select('table_label, server_name').eq('restaurant_id', current.id).then(function (r) {
+      if (r.error) return; // schéma pas encore à jour : pas de serveur affiché
+      cache.servers = {};
+      (r.data || []).forEach(function (x) { if (x.server_name) cache.servers[x.table_label] = x.server_name; });
+      emit('servers:updated', null);
+    });
+  }
+
+  function subscribeServers() {
+    sb.channel('tapigo-servers-' + current.id)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'table_servers', filter: 'restaurant_id=eq.' + current.id }, function () {
+        loadServers();
+      })
+      .subscribe(function (status) { if (status === 'SUBSCRIBED') loadServers(); });
+  }
+
   T.resetDemo = function () { /* sans objet en ligne */ };
 
   /* ---------------- Commandes ---------------- */
@@ -279,6 +310,7 @@
       p_note: payload.note || ''
     };
     if (payload.pay === 'online') args.p_pay = 'online';
+    if (payload.pay === 'online' && Number(payload.tip) > 0) args.p_tip = Math.round(Number(payload.tip) * 100) / 100;
     return sb.rpc('place_order', args).then(function (r) {
       if (r.error) throw new Error(r.error.message);
       var o = upsert(fromRow(r.data));
@@ -328,7 +360,8 @@
       applyRestaurant(rows[0]);
       subscribeRestaurant();
       subscribeStock();
-      return loadStock().catch(function () {}).then(function () { return clone(current); });
+      subscribeServers();
+      return Promise.all([loadStock().catch(function () {}), loadServers()]).then(function () { return clone(current); });
     });
   };
 
@@ -522,7 +555,8 @@
       applyRestaurant(r.data);
       subscribeRestaurant();
       subscribeStock();
-      return Promise.all([loadOrders(), loadStock()]);
+      subscribeServers();
+      return Promise.all([loadOrders(), loadStock(), loadServers()]);
     }).then(function () {
       sb.channel('tapigo-orders-' + current.id)
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders', filter: 'restaurant_id=eq.' + current.id }, function (p) {

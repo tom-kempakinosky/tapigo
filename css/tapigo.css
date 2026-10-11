@@ -807,3 +807,32 @@ button.table-badge:active { transform: scale(.96); }
 .nfc-tag b { font-family: var(--serif); font-size: 26px; font-weight: 600; display: block; text-align: center; line-height: 1; }
 .hub__tips { font-size: 13px; color: var(--muted); text-align: center; }
 .hub__tips code { background: var(--sand-2); padding: 2px 6px; border-radius: 6px; }
+
+/* Pourboire (paiement en ligne) */
+.tip-box { display: grid; gap: 8px; margin-top: 14px; }
+.tip-box__title { margin: 0; font-weight: 700; font-size: 14px; }
+.tip-box .help { margin: 0; }
+.tip-chips { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.tip-chip { display: grid; gap: 2px; justify-items: center; padding: 10px 4px; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--card); font: inherit; color: var(--ink); cursor: pointer; }
+.tip-chip b { font-size: 14px; }
+.tip-chip small { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tip-chip.is-on { background: var(--matte); border-color: var(--matte); color: #fff; }
+.tip-chip.is-on small { color: rgba(255, 255, 255, .7); }
+.tip-custom { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.tip-custom input { width: 110px; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff; font: inherit; font-size: 16px; font-weight: 700; text-align: right; outline: none; }
+.tip-custom input:focus { border-color: var(--ink-2); }
+@media (max-width: 380px) { .tip-chips { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* Serveur attitré */
+.track__server { margin: 6px 0 0; font-size: 14px; color: var(--ink-2); }
+.review-ask { margin: 0 0 6px; font-size: 15px; line-height: 1.5; }
+.table-server { margin-left: 10px; padding: 4px 10px; border-radius: 999px; border: 1px dashed var(--line); background: var(--card); font: inherit; font-size: 12px; font-weight: 700; color: var(--ink-2); vertical-align: middle; cursor: pointer; }
+.srv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; margin-top: 12px; }
+.srv-table { display: grid; gap: 2px; justify-items: center; padding: 8px 4px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); font: inherit; cursor: pointer; }
+.srv-table b { font-family: var(--serif); font-size: 22px; font-weight: 600; line-height: 1; }
+.srv-table small { font-size: 11px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srv-table.is-on { background: var(--matte); border-color: var(--matte); color: #fff; }
+.srv-table.is-on small { color: rgba(255, 255, 255, .75); }
+#srvKnown { margin: 8px 0 0; padding: 0; }
+.check-line { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; line-height: 1.4; cursor: pointer; }
+.check-line input { margin-top: 2px; width: 18px; height: 18px; accent-color: var(--matte); flex: none; }

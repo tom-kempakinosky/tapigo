@@ -93,7 +93,7 @@ serve(async (req) => {
       description: `${name} · table ${order.table_label} · commande n° ${order.number}`,
       metadata: { order_id, table: order.table_label, number: String(order.number) },
     },
-    line_items: lines.map((l) => {
+    line_items: [...lines.map((l) => {
       const opts = (l.options || []).map((o) => o.values.join(", ")).filter(Boolean).join(" · ");
       return {
         quantity: l.qty,
@@ -103,7 +103,14 @@ serve(async (req) => {
           product_data: { name: l.name, ...(opts ? { description: opts.slice(0, 200) } : {}) },
         },
       };
-    }),
+    }), ...(Number(order.tip) > 0 ? [{
+      quantity: 1,
+      price_data: {
+        currency: "eur",
+        unit_amount: Math.round(Number(order.tip) * 100),
+        product_data: { name: "Pourboire pour l'équipe" },
+      },
+    }] : [])],
   }, { account });
 
   await db.from("orders").update({ payment: { ...order.payment, session: session.id } }).eq("id", order_id);

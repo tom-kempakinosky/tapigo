@@ -29,7 +29,7 @@ Deno.serve(async (req) => {
   const orderFor = async () => {
     const id = (obj.client_reference_id || (obj.metadata as Record<string, string> | undefined)?.order_id) as string | undefined;
     if (!id) return null;
-    const { data: order } = await db.from("orders").select("id, restaurant_id, total, payment").eq("id", id).maybeSingle();
+    const { data: order } = await db.from("orders").select("id, restaurant_id, total, tip, payment").eq("id", id).maybeSingle();
     if (!order) return null;
     const { data: pay } = await db.from("restaurant_payments").select("stripe_account_id")
       .eq("restaurant_id", order.restaurant_id).maybeSingle();
@@ -47,7 +47,7 @@ Deno.serve(async (req) => {
         if (obj.payment_status !== "paid") break; // paiement différé : on attend la suite
         const order = await orderFor();
         if (!order) break;
-        if (Number(obj.amount_total) !== Math.round(Number(order.total) * 100)) {
+        if (Number(obj.amount_total) !== Math.round((Number(order.total) + Number(order.tip || 0)) * 100)) {
           console.error("Montant inattendu", obj.amount_total, "pour", order.id);
           break;
         }

@@ -56,6 +56,9 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - Fiche produit : options et suppléments, **14 allergènes réglementaires**, suggestions « Parfait avec ».
 - Panier avec notes pour la cuisine. **Payer à table** (terminal du restaurant) ou, si le restaurant l'active, **Payer maintenant** depuis le téléphone (carte, Apple Pay, Google Pay via Stripe). La commande part en cuisine dès le paiement validé.
 - **Bouton Service** : « Appeler un serveur » ou « Demander l'addition ».
+- **Pourboire** avec le paiement en ligne : 5 %, 10 %, 15 % ou montant libre, ajouté au paiement Stripe et reversé au restaurant (désactivable dans Établissement).
+- **Serveur de la table** affiché au client (« Votre serveur : Marco »), attribué depuis le dashboard.
+- **Avis Google** : quand la commande passe en « Terminée », le client est remercié puis redirigé vers la page d'avis après 6 secondes (bouton « Non merci » pour annuler).
 - Suivi en temps réel (Envoyée → En préparation → Prête → Servie), puis invitation à laisser un **avis Google**.
 - Bandeau « Commandes en pause » quand le restaurant suspend les commandes.
 
@@ -67,6 +70,7 @@ Le **mode en ligne** s'appuie sur [Supabase](https://supabase.com) et gère plus
 - Bouton **Pause** pour suspendre les commandes en ligne lors d'un coup de feu.
 - Carte : catégories (ajout, renommage, ordre), photos envoyées depuis le téléphone, allergènes, suggestions, prix et ruptures en direct.
 - **Statistiques** : chiffre d'affaires par jour, affluence par heure, plats les plus vendus, panier moyen, temps de préparation, part cuisine / bar, export CSV.
+- **Serveurs des tables** : on choisit un prénom, on touche les tables, c'est affiché au client et sur les tickets. Modifiable en direct depuis la vue « Par table ».
 - **Prise de commande en salle** (tous les rôles) : le serveur choisit la table, ajoute les plats et leurs options, note pour la cuisine, puis envoie. Commande marquée « Prise en salle », non bloquée par la pause ni par l'anti-abus, stocks vérifiés.
 - **Stocks** (toute l'équipe, gérant ou non) : quantités restantes décomptées à chaque commande, plat retiré de la carte à 0, « Plus que N » côté client, mise en rupture / remise en vente, alerte « épuisé » en cuisine.
 - **Prévision IA du stock** : chaque matin, Claude analyse les ventes des 8 dernières semaines (même jour, tendance, contexte saisi par l'équipe) et propose la quantité à prévoir par produit, avec une explication. L'équipe applique chaque suggestion ou tout d'un coup ; rien ne change sans validation.

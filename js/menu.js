@@ -28,6 +28,7 @@
     note: T.read(NOTE_KEY, ''),
     mine: T.read(MINE_KEY, []),
     trackingId: null,
+    tip: { mode: 'none', pct: 0, amount: 0 },
     payMethod: LIVE ? 'onsite' : 'applepay'
   };
 
@@ -54,8 +55,11 @@
     pause.hidden = !r.ordersPaused;
     pause.innerHTML = '<strong>Commandes en ligne en pause.</strong> Le restaurant est très sollicité : adressez-vous au serveur ou réessayez dans quelques minutes.';
 
+    var server = table && T.getTableServer ? T.getTableServer(table) : '';
     $('#welcome').innerHTML = I.nfc + (table
-      ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>. Composez votre commande : elle part directement en cuisine. ' +
+      ? '<p><strong>Bienvenue !</strong> Vous êtes installé·e à la <strong>table ' + esc(table) + '</strong>' +
+        (server ? ', servie par <strong>' + esc(server) + '</strong>' : '') +
+        '. Composez votre commande : elle part directement en cuisine. ' +
         '<button class="link-btn" type="button" data-change-table>Changer de table</button></p>'
       : '<p><strong>Bienvenue !</strong> Indiquez votre numéro de table pour pouvoir commander. ' +
         '<button class="link-btn" type="button" data-change-table>Indiquer ma table</button></p>');
@@ -568,6 +572,36 @@
       '<span class="opt__mark"></span></label>';
   }
 
+  /* Pourboire (paiement en ligne uniquement : à table, il se laisse sur le terminal). */
+  function tipsOffered() { return state.restaurant.tipsEnabled !== false; }
+
+  function tipAmount(total) {
+    var t = state.tip;
+    if (t.mode === 'pct') return Math.round(total * t.pct) / 100;
+    if (t.mode === 'custom') return Math.min(t.amount, total);
+    return 0;
+  }
+
+  function tipHTML(total) {
+    var t = state.tip;
+    var chip = function (val, label, sub, on) {
+      return '<button type="button" class="tip-chip' + (on ? ' is-on' : '') + '" data-tip="' + val + '" aria-pressed="' + on + '">' +
+        '<b>' + label + '</b>' + (sub ? '<small>' + sub + '</small>' : '') + '</button>';
+    };
+    var server = table && T.getTableServer ? T.getTableServer(table) : '';
+    return '<div class="tip-box"><p class="tip-box__title">Un pourboire pour ' + (server ? esc(server) + ' et l’équipe' : 'l’équipe') + ' ?</p>' +
+      '<div class="tip-chips">' +
+        chip('0', 'Non merci', '', t.mode === 'none') +
+        [5, 10, 15].map(function (p) { return chip(p, p + ' %', fmt(Math.round(total * p) / 100), t.mode === 'pct' && t.pct === p); }).join('') +
+        chip('custom', 'Autre', 'montant', t.mode === 'custom') +
+      '</div>' +
+      (t.mode === 'custom'
+        ? '<label class="tip-custom"><span>Montant du pourboire</span><input id="tipCustom" inputmode="decimal" placeholder="0,00" value="' +
+          (t.amount ? String(t.amount).replace('.', ',') : '') + '"><b>€</b></label>'
+        : '') +
+      '<p class="help">Reversé intégralement au restaurant.</p></div>';
+  }
+
   function openCheckout() {
     var s = cartSummary();
     if (!s.count) return;
@@ -591,6 +625,7 @@
             payMethodHTML('card', I.card, 'Carte bancaire', 'Visa, Mastercard, Amex · via Stripe')) +
           payMethodHTML('onsite', I.wallet, LIVE ? 'Payer à table' : 'Payer sur place', 'Le serveur passe avec le terminal en fin de repas') +
         '</div>' +
+        '<div id="tipBox"></div>' +
         '<div id="cardForm"></div>' +
         '<p class="secure" id="payNote"></p>',
       footer: '<button class="btn btn--primary" type="button" id="payBtn"></button>',
@@ -611,16 +646,34 @@
             : m === 'online'
               ? I.lock + ' Paiement sécurisé par Stripe, encaissé directement par ' + esc(state.restaurant.name) + '. Votre commande part en cuisine dès le paiement validé.'
               : I.lock + ' Paiement sécurisé par Stripe · Données chiffrées';
+          paintTip(true);
+        };
+        // Pourboire + bouton seulement (sans effacer la carte en cours de saisie).
+        var paintTip = function (rebuild) {
+          var m = state.payMethod;
+          var tipOn = tipsOffered() && m !== 'onsite';
+          if (rebuild) $('#tipBox', sheet).innerHTML = tipOn ? tipHTML(s.total) : '';
+          var due = s.total + (tipOn ? tipAmount(s.total) : 0);
           btn.innerHTML = m === 'onsite'
             ? 'Commander · ' + fmt(s.total)
-            : m === 'online' ? I.lock.replace('<svg ', '<svg width="16" height="16" ') + ' Payer · ' + fmt(s.total)
-            : m === 'applepay' ? I.apple.replace('<svg ', '<svg width="18" height="18" ') + ' Payer et commander · ' + fmt(s.total)
-            : 'Payer et commander · ' + fmt(s.total);
+            : m === 'online' ? I.lock.replace('<svg ', '<svg width="16" height="16" ') + ' Payer · ' + fmt(due)
+            : m === 'applepay' ? I.apple.replace('<svg ', '<svg width="18" height="18" ') + ' Payer et commander · ' + fmt(due)
+            : 'Payer et commander · ' + fmt(due);
         };
         paint();
 
         sheet.addEventListener('change', function (e) {
           if (e.target.name === 'pay') { state.payMethod = e.target.value; paint(); }
+        });
+        sheet.addEventListener('click', function (e) {
+          var c = e.target.closest('[data-tip]');
+          if (!c) return;
+          var v = c.dataset.tip;
+          state.tip = v === 'custom' ? { mode: 'custom', pct: 0, amount: state.tip.mode === 'custom' ? state.tip.amount : 0 }
+            : v === '0' ? { mode: 'none', pct: 0, amount: 0 }
+            : { mode: 'pct', pct: +v, amount: 0 };
+          paintTip(true);
+          if (v === 'custom') { var f = $('#tipCustom', sheet); f.focus(); }
         });
         sheet.addEventListener('input', function (e) {
           var t = e.target;
@@ -628,6 +681,12 @@
           if (t.id === 'ccExp') t.value = t.value.replace(/\D/g, '').slice(0, 4).replace(/^(\d{2})(\d)/, '$1/$2');
           if (t.id === 'ccCvc') t.value = t.value.replace(/\D/g, '').slice(0, 4);
           if (t.id === 'tableInput') t.value = t.value.replace(/[^0-9A-Za-z]/g, '').slice(0, 4);
+          if (t.id === 'tipCustom') {
+            t.value = t.value.replace(/[^0-9.,]/g, '').slice(0, 7);
+            var amt = Math.round((parseFloat(t.value.replace(',', '.')) || 0) * 100) / 100;
+            state.tip.amount = Math.min(Math.max(0, amt), s.total);
+            paintTip(false);
+          }
           t.style.borderColor = '';
         });
 
@@ -702,10 +761,11 @@
         table: tableNo,
         note: state.note,
         payment: payment,
+        tip: payment.method !== 'onsite' && tipsOffered() ? tipAmount(s.total) : 0,
         lines: s.lines.map(function (l) { return l.built; })
       });
     }).then(function (order) {
-      state.cart = []; state.note = '';
+      state.cart = []; state.note = ''; state.tip = { mode: 'none', pct: 0, amount: 0 };
       saveCart();
       if (!table) setTable(tableNo);
       state.mine.push(order.id);
@@ -737,6 +797,7 @@
       table: tableNo,
       note: state.note,
       pay: 'online',
+      tip: tipsOffered() ? tipAmount(s.total) : 0,
       lines: s.lines.map(function (l) { return l.built; })
     }).then(function (order) {
       orderId = order.id;
@@ -769,7 +830,7 @@
       UI.toast('Paiement annulé · votre panier est conservé', 4500);
       return;
     }
-    state.cart = []; state.note = '';
+    state.cart = []; state.note = ''; state.tip = { mode: 'none', pct: 0, amount: 0 };
     saveCart();
     if (state.mine.indexOf(id) < 0) { state.mine.push(id); T.write(MINE_KEY, state.mine); }
     UI.closeSheet();
@@ -815,6 +876,7 @@
       '<div class="track__hero">' + icon +
         '<p class="eyebrow">Commande n° ' + order.number + ' · ' + T.clock(order.createdAt) + '</p>' +
         '<h2>' + esc(info.client) + '</h2><p>' + esc(info.hint) + '</p>' +
+        (T.getTableServer && T.getTableServer(order.table) ? '<p class="track__server">Votre serveur : <strong>' + esc(T.getTableServer(order.table)) + '</strong></p>' : '') +
       '</div>' +
       '<ol class="steps">' + CLIENT_STEPS.map(function (s, i) {
         // Étapes atteintes cochées, l'étape suivante « respire ».
@@ -833,7 +895,8 @@
       '<div class="totals">' +
         '<div class="totals__row"><span>Paiement</span><span class="badge ' + (paid ? 'badge--ok' : 'badge--warn') + '">' +
           (paid ? 'Payé · ' + (PAY_LABEL[order.payment.method] || 'carte') : pending ? 'Paiement en cours…' : 'À régler sur place') + '</span></div>' +
-        '<div class="totals__row totals__row--grand"><span>Total</span><span>' + fmt(order.total) + '</span></div>' +
+        (order.tip ? '<div class="totals__row"><span>Pourboire</span><span>' + fmt(order.tip) + '</span></div>' : '') +
+        '<div class="totals__row totals__row--grand"><span>Total</span><span>' + fmt(order.total + (order.tip || 0)) + '</span></div>' +
       '</div>' +
       ((order.status === 'servie' || order.status === 'terminee') && state.restaurant.reviewUrl
         ? '<div class="review-cta"><p><strong>Vous avez aimé ?</strong> Votre avis aide beaucoup ' + esc(state.restaurant.name) + '.</p>' +
@@ -842,6 +905,43 @@
       '<button class="btn btn--primary btn--block" type="button" data-close-track>Revenir au menu</button>' +
       '<p class="secure">Cette page se met à jour automatiquement.</p>' +
     '</div>';
+  }
+
+  /*
+   * Commande terminée : remerciement puis redirection vers la page d'avis
+   * Google après quelques secondes (annulable). Une seule fois par visite.
+   */
+  var REVIEW_DELAY = 6;
+  function askReview(order) {
+    var url = safeUrl(state.restaurant.reviewUrl);
+    if (url === '#') return;
+    var key = 'tapigo.v1.review.' + scope;
+    try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, order.id); } catch (e) { /* ignore */ }
+    var left = REVIEW_DELAY, timer = null;
+    UI.closeSheet().then(function () {
+      UI.openSheet({
+        label: 'Laisser un avis',
+        head: '<p class="eyebrow">Merci pour votre visite</p><h2>Vous avez aimé ?</h2>',
+        body: '<p class="review-ask">Votre avis aide beaucoup <strong>' + esc(state.restaurant.name) + '</strong>' +
+          (T.getTableServer && T.getTableServer(order.table) ? ' et ' + esc(T.getTableServer(order.table)) : '') + '. Cela ne prend que 30 secondes.</p>' +
+          '<p class="help" id="reviewCount">Ouverture de Google dans ' + left + ' s…</p>',
+        footer: '<a class="btn btn--primary" href="' + esc(url) + '" id="reviewGo">★ Donner mon avis</a>' +
+          '<button class="btn btn--ghost" type="button" id="reviewNo">Non merci</button>',
+        onMount: function (sheet) {
+          var stop = function () { clearInterval(timer); };
+          $('#reviewNo', sheet).addEventListener('click', function () { stop(); UI.closeSheet(); });
+          $('#reviewGo', sheet).addEventListener('click', stop);
+          timer = setInterval(function () {
+            // Fenêtre fermée (glissée ou ✕) : pas de redirection.
+            if (!document.body.contains(sheet) || sheet.classList.contains('is-closing')) return stop();
+            left -= 1;
+            var c = $('#reviewCount', sheet);
+            if (c) c.textContent = left > 0 ? 'Ouverture de Google dans ' + left + ' s…' : 'Ouverture de Google…';
+            if (left <= 0) { stop(); location.href = url; }
+          }, 1000);
+        }
+      });
+    });
   }
 
   function safeUrl(u) { return /^https:\/\//i.test(u || '') ? u : '#'; }
@@ -982,7 +1082,13 @@
           UI.toast('<strong>Commande n° ' + o.number + '</strong> · ' + esc(T.statusInfo(o.status).client), 4000);
         }
         if (o.status === 'prete' || o.status === 'servie') UI.vibrate([60, 60, 60]);
+        if (o.status === 'terminee') askReview(o);
         renderTrackPill();
+      }
+      if (msg.type === 'servers:updated') {
+        renderHeader();
+        var tr = state.trackingId && T.getOrder(state.trackingId);
+        if (tr) $('#trackRoot .track').innerHTML = trackHTML(tr);
       }
       if (msg.type === 'orders:sync') {
         var cur = state.trackingId && T.getOrder(state.trackingId);

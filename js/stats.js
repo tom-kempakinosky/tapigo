@@ -35,11 +35,12 @@
     for (var t = start.getTime(); t <= now; t += DAY) byDay[dayKey(t)] = { ts: t, revenue: 0, orders: 0 };
     var byHour = []; for (var h = 0; h < 24; h++) byHour.push({ hour: h, orders: 0, revenue: 0 });
     var items = {}, stations = { cuisine: 0, bar: 0 }, tables = {};
-    var revenue = 0, count = 0, qty = 0, prep = [], byStaff = 0;
+    var revenue = 0, count = 0, qty = 0, prep = [], byStaff = 0, tips = 0, tipped = 0;
 
     orders.forEach(function (o) {
       if (o.createdAt < start.getTime()) return;
       revenue += o.total; count++;
+      if (o.tip) { tips += o.tip; tipped++; }
       if (o.source === 'serveur') byStaff++;
       var k = dayKey(o.createdAt);
       if (byDay[k]) { byDay[k].revenue += o.total; byDay[k].orders++; }
@@ -59,7 +60,7 @@
 
     prep.sort(function (a, b) { return a - b; });
     return {
-      revenue: revenue, count: count, qty: qty, byStaff: byStaff,
+      revenue: revenue, count: count, qty: qty, byStaff: byStaff, tips: tips, tipped: tipped,
       basket: count ? revenue / count : 0,
       prepMedian: prep.length ? prep[Math.floor(prep.length / 2)] : null,
       days: Object.keys(byDay).sort().map(function (k) { return byDay[k]; }),
@@ -205,6 +206,7 @@
           tile('Prises en salle', Math.round(s.byStaff / s.count * 100) + ' %', s.byStaff + ' par un serveur · ' + (s.count - s.byStaff) + ' via la plaque NFC') +
           tile('Table la plus active', s.tables[0] ? 'Table ' + esc(s.tables[0].table) : '—', s.tables[0] ? fmt(s.tables[0].revenue) : '') +
           tile('Meilleur jour', bestDay(s.days), '') +
+          (s.tips ? tile('Pourboires', fmt(s.tips), s.tipped + ' commande' + (s.tipped > 1 ? 's' : '') + ' payée' + (s.tipped > 1 ? 's' : '') + ' en ligne · hors chiffre d’affaires') : '') +
         '</div>'
       );
 

@@ -67,7 +67,8 @@
         '<div class="ticket__table"><div><small>Table</small><b>' + esc(o.table) + '</b></div></div>' +
         '<div class="ticket__meta"><strong>N° ' + o.number + (o.seen ? '' : ' · <span style="color:var(--danger)">Nouvelle</span>') + '</strong>' +
           (o.source === 'serveur' ? '<span class="badge badge--info">Prise en salle</span> ' : '') +
-          '<span>' + T.clock(o.createdAt) + ' · ' + items + ' article' + (items > 1 ? 's' : '') + '</span></div>' +
+          '<span>' + T.clock(o.createdAt) + ' · ' + items + ' article' + (items > 1 ? 's' : '') +
+            (T.getTableServer(o.table) ? ' · ' + esc(T.getTableServer(o.table)) : '') + '</span></div>' +
         timerHTML(o) +
       '</header>' +
       '<ul class="ticket__lines">' + o.lines.map(function (l) {
@@ -81,6 +82,7 @@
       (o.note ? '<p class="ticket__note">📝 ' + esc(o.note) + '</p>' : '') +
       '<div class="ticket__foot"><span class="badge ' + (paid ? 'badge--ok' : 'badge--warn') + '">' +
         (paid ? 'Payé · ' + PAY[o.payment.method] : 'À encaisser') + '</span>' +
+        (o.tip ? '<span class="badge badge--ok" title="Pourboire payé en ligne">+ ' + fmt(o.tip) + ' pourboire</span>' : '') +
         '<button class="link-btn" type="button" data-print title="Imprimer le ticket">🖨 Imprimer</button>' +
         '<strong>' + fmt(o.total) + '</strong></div>' +
       '<div class="ticket__actions">' + ACTIONS.map(function (a) {
@@ -130,6 +132,7 @@
     var html = requestsHTML() + statsHTML(all) +
       '<div class="k-filters">' +
         '<button class="btn btn--primary btn--sm" type="button" data-new-order>+ Prendre une commande</button>' +
+        '<button class="btn btn--ghost btn--sm" type="button" data-servers>Serveurs des tables</button>' +
         seg('layout', state.layout, [['status', 'Par statut'], ['table', 'Par table']]) +
         seg('station', state.station, [['all', 'Tout'], ['cuisine', 'Cuisine'], ['bar', 'Bar']]) +
         (state.sound ? '' : '<button class="btn btn--soft btn--sm" type="button" data-enable-sound>' + I.bell.replace('<svg ', '<svg width="16" height="16" ') + ' Activer les alertes sonores</button>') +
@@ -152,7 +155,9 @@
             var list = tables[k];
             var due = list.filter(function (o) { return o.payment.status !== 'paid'; }).reduce(function (s, o) { return s + o.total; }, 0);
             var total = list.reduce(function (s, o) { return s + o.total; }, 0);
-            return '<section class="table-group"><div class="table-group__head"><h2>Table ' + esc(k) + '</h2>' +
+            var srv = T.getTableServer(k);
+            return '<section class="table-group"><div class="table-group__head"><h2>Table ' + esc(k) +
+              '<button class="table-server" type="button" data-servers="' + esc(k) + '">' + (srv ? esc(srv) : '+ serveur') + '</button></h2>' +
               (due ? '<span class="badge badge--warn">À encaisser ' + fmt(due) + '</span>' : '<span class="badge badge--ok">Réglée</span>') + '</div>' +
               list.map(ticketHTML).join('') +
               '<div class="table-group__foot"><span>Total de la table <strong>' + fmt(total) + '</strong></span>' +
@@ -481,7 +486,9 @@
           '<label class="field span-2"><span>Accroche</span><input name="tagline" maxlength="80" value="' + esc(r.tagline || '') + '"></label>' +
           '<label class="field"><span>Nombre de tables</span><input name="tables" inputmode="numeric" value="' + (r.tables || 12) + '"></label>' +
           '<label class="field"><span>Lettre du logo</span><input name="logoLetter" maxlength="1" value="' + esc(r.logoLetter || r.name.charAt(0)) + '"></label>' +
-          '<label class="field span-2"><span>Lien d’avis Google (proposé au client après son repas)</span>' +
+          '<label class="check-line span-2"><input type="checkbox" name="tipsEnabled"' + (r.tipsEnabled === false ? '' : ' checked') + '>' +
+            '<span>Proposer un pourboire lors du paiement en ligne (5 %, 10 %, 15 % ou montant libre)</span></label>' +
+          '<label class="field span-2"><span>Lien d’avis Google (le client y est redirigé quand sa commande est terminée)</span>' +
             '<input name="reviewUrl" type="url" value="' + esc(r.reviewUrl || '') + '" placeholder="https://g.page/r/…/review">' +
             '<small class="help">Google Business Profile → « Demander des avis » → copier le lien.</small></label>' +
           '<label class="field span-2"><span>Lien à écrire sur toutes les plaques NFC (le client indique sa table)</span>' +
@@ -508,7 +515,8 @@
             tagline: f.tagline.value.trim(),
             tables: Math.max(1, Math.min(200, parseInt(f.tables.value, 10) || r.tables || 12)),
             logoLetter: f.logoLetter.value.trim(),
-            reviewUrl: review
+            reviewUrl: review,
+            tipsEnabled: f.tipsEnabled.checked
           });
           T.saveRestaurant(info);
           UI.closeSheet();
@@ -584,6 +592,90 @@
   }
 
   /* ======================================================================
+     Serveur attitré de chaque table (affiché au client)
+     ====================================================================== */
+  function openServers(prefTable) {
+    var count = Math.max(1, parseInt(T.getRestaurant().tables, 10) || 12);
+    var picked = {};
+    if (prefTable) picked[prefTable] = true;
+    var name = prefTable ? T.getTableServer(prefTable) : '';
+    var KEY = 'tapigo.v1.kitchen.serverNames';
+    var known = function () {
+      var list = T.read(KEY, []);
+      var all = T.getTableServers();
+      Object.keys(all).forEach(function (k) { if (list.indexOf(all[k]) < 0) list.push(all[k]); });
+      return list.slice(0, 12);
+    };
+    var gridHTML = function () {
+      var all = T.getTableServers();
+      var html = '';
+      for (var i = 1; i <= count; i++) {
+        var k = String(i);
+        html += '<button type="button" class="srv-table' + (picked[k] ? ' is-on' : '') + '" data-pick-table="' + k + '" aria-pressed="' + !!picked[k] + '">' +
+          '<b>' + k + '</b><small>' + (all[k] ? esc(all[k]) : '—') + '</small></button>';
+      }
+      return html;
+    };
+    UI.openSheet({
+      label: 'Serveurs des tables',
+      head: '<p class="eyebrow">Salle</p><h2>Serveurs des tables</h2>',
+      body:
+        '<p class="help">Le client voit « Votre serveur : … » sur son téléphone. Choisissez un prénom, touchez les tables concernées, puis enregistrez.</p>' +
+        '<label class="field"><span>Prénom du serveur</span><input id="srvName" maxlength="40" placeholder="Ex : Marco" value="' + esc(name) + '" autocomplete="off"></label>' +
+        '<div class="chips" id="srvKnown"></div>' +
+        '<div class="srv-grid" id="srvGrid">' + gridHTML() + '</div>' +
+        '<button class="link-btn" type="button" id="srvAll">Tout sélectionner</button>',
+      footer:
+        '<button class="btn btn--ghost" type="button" id="srvClear">Retirer le serveur</button>' +
+        '<button class="btn btn--primary" type="button" id="srvSave">Attribuer</button>',
+      onMount: function (sheet) {
+        var paintKnown = function () {
+          $('#srvKnown', sheet).innerHTML = known().map(function (n) {
+            return '<button type="button" class="chip" data-known="' + esc(n) + '">' + esc(n) + '</button>';
+          }).join('');
+        };
+        paintKnown();
+        var selected = function () { return Object.keys(picked).filter(function (k) { return picked[k]; }); };
+        sheet.addEventListener('click', function (e) {
+          var b;
+          if ((b = e.target.closest('[data-pick-table]'))) {
+            picked[b.dataset.pickTable] = !picked[b.dataset.pickTable];
+            $('#srvGrid', sheet).innerHTML = gridHTML();
+          } else if ((b = e.target.closest('[data-known]'))) {
+            $('#srvName', sheet).value = b.dataset.known;
+          } else if (e.target.closest('#srvAll')) {
+            var allOn = selected().length === count;
+            for (var i = 1; i <= count; i++) picked[String(i)] = !allOn;
+            $('#srvGrid', sheet).innerHTML = gridHTML();
+          }
+        });
+        var apply = function (value) {
+          var tables = selected();
+          if (!tables.length) return UI.toast('Touchez d’abord une ou plusieurs tables');
+          if (value) {
+            var list = T.read(KEY, []).filter(function (n) { return n !== value; });
+            list.unshift(value);
+            T.write(KEY, list.slice(0, 12));
+          }
+          T.setTableServers(tables, value);
+          picked = {};
+          $('#srvGrid', sheet).innerHTML = gridHTML();
+          paintKnown();
+          UI.toast(value
+            ? '<strong>' + esc(value) + '</strong> · table' + (tables.length > 1 ? 's ' : ' ') + tables.join(', ')
+            : 'Serveur retiré · table' + (tables.length > 1 ? 's ' : ' ') + tables.join(', '));
+        };
+        $('#srvSave', sheet).addEventListener('click', function () {
+          var v = $('#srvName', sheet).value.trim();
+          if (!v) { $('#srvName', sheet).focus(); return UI.toast('Indiquez le prénom du serveur'); }
+          apply(v);
+        });
+        $('#srvClear', sheet).addEventListener('click', function () { apply(''); });
+      }
+    });
+  }
+
+  /* ======================================================================
      Impression du ticket (imprimante thermique 80 mm ou classique)
      ====================================================================== */
   function printTicket(id) {
@@ -601,6 +693,8 @@
       }).join('') +
       (o.note ? '<hr><p><strong>Note :</strong> ' + esc(o.note) + '</p>' : '') +
       '<hr><p class="pt-total"><span>Total</span><span>' + fmt(o.total) + '</span></p>' +
+      (o.tip ? '<p class="pt-total"><span>Pourboire</span><span>' + fmt(o.tip) + '</span></p>' : '') +
+      (T.getTableServer(o.table) ? '<p class="pt-center">Serveur : ' + esc(T.getTableServer(o.table)) + '</p>' : '') +
       '<p class="pt-center">' + (o.payment.status === 'paid' ? 'Payé' : 'À encaisser') + '</p></div>';
     window.print();
   }
@@ -1155,6 +1249,7 @@
       if (e.target.closest('[data-enable-sound]')) return setSound(true);
       if ((t = e.target.closest('[data-reopen]'))) return T.updateOrderStatus(t.dataset.reopen, 'servie');
       if ((t = e.target.closest('[data-new-order]'))) return openOrderPad(t.dataset.newOrder || '');
+      if ((t = e.target.closest('[data-servers]'))) return openServers(t.dataset.servers || '');
       if ((t = e.target.closest('[data-request-done]'))) { T.completeServiceRequest(t.dataset.requestDone); return renderOrders(); }
       if ((t = e.target.closest('[data-close-table]'))) {
         var tb = t.dataset.closeTable;
@@ -1284,6 +1379,7 @@
       if ((msg.type === 'menu:updated' || msg.type === 'demo:reset') && state.view === 'menu') renderMenuEditor();
       if (msg.type === 'restaurant:updated' || msg.type === 'demo:reset') { renderBrand(); renderPause(); }
       if (msg.type === 'service:created') announceService(msg.payload);
+      if (msg.type === 'servers:updated' && state.view === 'orders') renderOrders();
       if (msg.type === 'stock:updated' || msg.type === 'menu:updated' || msg.type === 'demo:reset') {
         updateStockBadge();
         if (state.view === 'stock' && !(document.activeElement && document.activeElement.matches('[data-qty-input]'))) renderStock();
